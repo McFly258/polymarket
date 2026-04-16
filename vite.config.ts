@@ -1,5 +1,6 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
+import polymarketApiPlugin from './collector/vite-plugin'
 
 const clobProxy = {
   '/clob-api': {
@@ -11,7 +12,8 @@ const clobProxy = {
 }
 
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), polymarketApiPlugin()],
   server: { proxy: clobProxy },
   preview: { proxy: clobProxy },
+  optimizeDeps: { exclude: ['better-sqlite3'] },
 })

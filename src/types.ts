@@ -86,3 +86,25 @@ export interface DashboardData {
   rows: RewardsRow[]
   totals: DashboardTotals
 }
+
+export interface RewardHistoryPoint {
+  ts: number
+  daily_rate: number
+  min_size: number
+  max_spread: number
+}
+
+export interface BookHistoryPoint {
+  token_id: string
+  outcome: string
+  ts: number
+  mid: number | null
+  spread: number | null
+  qualifying_bid_size: number
+  qualifying_ask_size: number
+}
+
+export interface MarketHistoryData {
+  rewards: RewardHistoryPoint[]
+  books: BookHistoryPoint[]
+}

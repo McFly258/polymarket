@@ -4,6 +4,8 @@ import type { BookSnapshot, RewardsRow } from '../types'
 type Props = {
   rows: RewardsRow[]
   loading: boolean
+  selectedId: string | null
+  onSelect: (id: string | null) => void
 }
 
 function SideChip({ book }: { book: BookSnapshot }) {
@@ -43,7 +45,7 @@ function StatusBadge({ row }: { row: RewardsRow }) {
   return <span className="badge badge-off">out</span>
 }
 
-export function RewardsTable({ rows, loading }: Props) {
+export function RewardsTable({ rows, loading, selectedId, onSelect }: Props) {
   return (
     <article className="panel table-panel">
       <div className="panel-header">
@@ -73,12 +75,17 @@ export function RewardsTable({ rows, loading }: Props) {
           </thead>
           <tbody>
             {rows.map((row) => (
-              <tr key={row.conditionId}>
+              <tr
+                key={row.conditionId}
+                className={selectedId === row.conditionId ? 'row-selected' : 'row-clickable'}
+                onClick={() => onSelect(selectedId === row.conditionId ? null : row.conditionId)}
+              >
                 <td className="question-cell">
                   <a
                     href={`https://polymarket.com/event/${row.slug}`}
                     target="_blank"
                     rel="noreferrer"
+                    onClick={(e) => e.stopPropagation()}
                   >
                     {row.question}
                   </a>

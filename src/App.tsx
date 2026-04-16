@@ -7,6 +7,7 @@ import { HeroPanel } from './components/HeroPanel'
 import { StatCards } from './components/StatCards'
 import { FilterBar } from './components/FilterBar'
 import { RewardsTable } from './components/RewardsTable'
+import { MarketHistoryPanel } from './components/MarketHistoryPanel'
 
 function App() {
   const [data, setData] = useState<DashboardData | null>(null)
@@ -16,6 +17,7 @@ function App() {
   const [query, setQuery] = useState('')
   const [onlyEligible, setOnlyEligible] = useState(false)
   const [minDaily, setMinDaily] = useState(0)
+  const [selectedMarketId, setSelectedMarketId] = useState<string | null>(null)
 
   const refresh = useCallback(async () => {
     try {
@@ -69,7 +71,23 @@ function App() {
         onMinDaily={setMinDaily}
       />
 
-      <RewardsTable rows={filteredRows} loading={loading} />
+      <RewardsTable
+        rows={filteredRows}
+        loading={loading}
+        selectedId={selectedMarketId}
+        onSelect={setSelectedMarketId}
+      />
+
+      {selectedMarketId && (() => {
+        const row = data?.rows.find((r) => r.conditionId === selectedMarketId)
+        return row ? (
+          <MarketHistoryPanel
+            conditionId={selectedMarketId}
+            question={row.question}
+            onClose={() => setSelectedMarketId(null)}
+          />
+        ) : null
+      })()}
     </main>
   )
 }
