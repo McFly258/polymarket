@@ -1,4 +1,4 @@
-import { fetchBooks, fetchRewardMarkets } from '../api/polymarket'
+import { fetchBooks, fetchRewardMarkets, type BookView } from '../api/polymarket'
 import { USDC_POLYGON } from '../constants'
 import type { BookSnapshot, DashboardData, RawMarket, RewardsRow } from '../types'
 
@@ -23,19 +23,29 @@ function withinRewardSpread(
   return bookSpreadDollars <= 2 * maxSpreadDollars
 }
 
-export async function loadDashboard(): Promise<DashboardData> {
-  const rawMarkets = await fetchRewardMarkets()
-
-  const active = rawMarkets.filter(
+export function filterActiveRewardMarkets(raw: RawMarket[]): RawMarket[] {
+  return raw.filter(
     (m) =>
       m.active && !m.closed && !m.archived && m.accepting_orders && m.enable_order_book &&
       m.rewards && (m.rewards.rates?.length ?? 0) > 0,
   )
+}
 
-  const tokenIds = active.flatMap((m) => m.tokens.map((t) => t.token_id))
-  const books = await fetchBooks(tokenIds)
+export function collectTokenIds(markets: RawMarket[]): string[] {
+  return markets.flatMap((m) => m.tokens.map((t) => t.token_id))
+}
 
-  const rows: RewardsRow[] = active.map((market) => {
+/**
+ * Pure derivation: given the set of reward markets and a (possibly partial)
+ * map of current books, compute the dashboard view. This is called on every
+ * ws tick — keep it cheap.
+ */
+export function buildDashboard(
+  markets: RawMarket[],
+  books: Map<string, BookView>,
+  updatedAt: string,
+): DashboardData {
+  const rows: RewardsRow[] = markets.map((market) => {
     const maxSpreadDollars = market.rewards.max_spread / 100
     const bookSnapshots: BookSnapshot[] = market.tokens.map((token) => {
       const book = books.get(token.token_id)
@@ -97,7 +107,7 @@ export async function loadDashboard(): Promise<DashboardData> {
   rows.sort((a, b) => b.dailyRate - a.dailyRate)
 
   return {
-    updatedAt: new Date().toISOString(),
+    updatedAt,
     rows,
     totals: {
       markets: rows.length,
@@ -105,4 +115,27 @@ export async function loadDashboard(): Promise<DashboardData> {
       eligibleMarkets: rows.filter((r) => r.eligibleSides > 0).length,
     },
   }
+}
+
+export interface MarketsAndBooks {
+  markets: RawMarket[]
+  books: Map<string, BookView>
+  updatedAt: string
+}
+
+/**
+ * One-shot HTTP load of markets + books. Used for the initial boot snapshot
+ * and as a periodic safety resync in case the WS misses updates.
+ */
+export async function loadMarketsAndBooks(): Promise<MarketsAndBooks> {
+  const rawMarkets = await fetchRewardMarkets()
+  const markets = filterActiveRewardMarkets(rawMarkets)
+  const books = await fetchBooks(collectTokenIds(markets))
+  return { markets, books, updatedAt: new Date().toISOString() }
+}
+
+/** Back-compat for any caller still using the old single-call signature. */
+export async function loadDashboard(): Promise<DashboardData> {
+  const { markets, books, updatedAt } = await loadMarketsAndBooks()
+  return buildDashboard(markets, books, updatedAt)
 }

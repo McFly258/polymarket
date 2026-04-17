@@ -1,12 +1,41 @@
 import { formatUpdatedAt } from '../constants'
+import type { ConnectionState } from '../services/wsClient'
 
 type Props = {
   updatedAt: string | null
   loading: boolean
   onRefresh: () => void
+  wsState: ConnectionState
+  streamedCount: number
+  totalMarkets: number
 }
 
-export function HeroPanel({ updatedAt, loading, onRefresh }: Props) {
+function wsLabel(state: ConnectionState): { label: string; className: string } {
+  switch (state) {
+    case 'open':
+      return { label: 'Live', className: 'ws-dot ws-dot-open' }
+    case 'connecting':
+      return { label: 'Connecting', className: 'ws-dot ws-dot-connecting' }
+    case 'reconnecting':
+      return { label: 'Reconnecting', className: 'ws-dot ws-dot-connecting' }
+    case 'closed':
+      return { label: 'Offline', className: 'ws-dot ws-dot-closed' }
+    case 'idle':
+    default:
+      return { label: 'Idle', className: 'ws-dot ws-dot-idle' }
+  }
+}
+
+export function HeroPanel({
+  updatedAt,
+  loading,
+  onRefresh,
+  wsState,
+  streamedCount,
+  totalMarkets,
+}: Props) {
+  const ws = wsLabel(wsState)
+  const streamedTokens = streamedCount
   return (
     <header className="hero-panel">
       <div>
@@ -19,8 +48,12 @@ export function HeroPanel({ updatedAt, loading, onRefresh }: Props) {
       </div>
       <div className="hero-meta">
         <button className="refresh-button" onClick={onRefresh} disabled={loading}>
-          {loading ? 'Refreshing…' : 'Refresh now'}
+          {loading ? 'Refreshing…' : 'Resync'}
         </button>
+        <span className="ws-status" title={`${streamedTokens} token streams open of ${totalMarkets * 2} total`}>
+          <span className={ws.className} /> {ws.label}
+          {streamedTokens > 0 ? ` · ${streamedTokens} streams` : ''}
+        </span>
         <span>{updatedAt ? `Updated ${formatUpdatedAt(updatedAt)}` : 'Loading live data…'}</span>
       </div>
     </header>
