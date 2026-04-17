@@ -130,10 +130,41 @@ export interface StrategyConfig {
   postingDistancePct: number
   /** Minimum number of ticks the order must sit behind best bid/ask. */
   minTicksBehindTop: number
-  /** Minimum expected daily yield (%) to bother allocating capital. */
+  /** Minimum expected NET daily yield (%) to bother allocating capital. */
   minYieldPct: number
   /** Exclude markets resolving in less than N days (adverse selection spike). */
   minDaysToResolution: number
+  /** Maker fee as a fraction of notional per fill (0.00 = no fee, Polymarket default today). */
+  makerFeePct: number
+  /** Taker fee as a fraction of notional — used when we hedge inventory after a fill. */
+  takerFeePct: number
+  /** USD gas cost per order operation (place or cancel). Polymarket uses meta-tx so default is 0. */
+  gasCostPerOrderUsd: number
+  /**
+   * Reprice when the mid moves by more than this many cents. Smaller = more
+   * reposts (more gas cost) but quotes stay well-placed; larger = fewer reposts
+   * but more time outside the reward zone.
+   */
+  repriceThresholdCents: number
+  /**
+   * If true, assume we taker-hedge inventory back to flat immediately on any fill
+   * (costs takerFeePct notional + crossing the spread). If false, we hold the
+   * position and carry the P&L to resolution — riskier, no hedge cost.
+   */
+  hedgeFillsOnBook: boolean
+}
+
+/** Per-market daily volatility estimate (std-dev of mid moves, in dollars). */
+export interface MarketVolatility {
+  conditionId: string
+  dailyStddevDollars: number
+  samples: number
+  hoursCovered: number
+}
+
+export interface VolatilityMap {
+  volatility: Record<string, MarketVolatility>
+  windowHours: number
 }
 
 export interface StrategyAllocation {
@@ -160,12 +191,24 @@ export interface StrategyAllocation {
   ourScore: number
   /** Total competing qualifying score on both sides. */
   competingScore: number
-  /** Expected daily reward in USD. */
+  /** Gross daily reward in USD (before fees/fills/gas). */
+  grossDailyUsd: number
+  /** Net daily USD after fees, expected fill P&L, and reprice gas costs. */
   expectedDailyUsd: number
   /** Capital deployed ($) for this allocation. */
   capitalUsd: number
-  /** Annualised yield if we earn expectedDaily every day. */
+  /** Net yield per day as a percentage of capitalUsd. */
   yieldPctDaily: number
+  /** Daily mid volatility (USD, 1 sigma) used in the fill/reprice model. */
+  dailyVolUsd: number
+  /** Expected number of reprices per day given mid volatility + reprice threshold. */
+  expectedRepricesPerDay: number
+  /** Expected USD gas cost per day for reprices (cancel+repost, both sides). */
+  expectedRepriceCostUsd: number
+  /** Expected number of fills per day (per side). */
+  expectedFillsPerDayPerSide: number
+  /** Expected fill-related USD cost per day (adverse selection + maker/taker fees). */
+  expectedFillCostUsd: number
   warnings: string[]
 }
 
@@ -173,6 +216,12 @@ export interface SimulationResult {
   config: StrategyConfig
   allocations: StrategyAllocation[]
   deployedCapital: number
+  /** Sum of gross daily rewards before costs. */
+  grossDailyUsd: number
+  /** Sum of net daily P&L after fees, fills, and gas. */
   expectedDailyUsd: number
+  /** Net portfolio yield (net daily / deployed). */
   portfolioYieldPctDaily: number
+  /** Total expected daily cost (fills + gas) across the portfolio. */
+  totalCostUsd: number
 }

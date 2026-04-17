@@ -268,6 +268,73 @@ export function getBookHistoryByMarket(conditionId: string) {
   }>
 }
 
+// Returns per-market daily volatility (σ of mid in dollars) computed over the
+// last `windowHours` of book snapshots. Uses stddev of mid-to-mid changes
+// between consecutive snapshots, scaled to a full day.
+//
+// For each condition_id we compute volatility on the first outcome's token
+// (binary markets are mirror-images so YES and NO have the same σ).
+export function getMarketVolatility(windowHours = 24) {
+  const db = getDb()
+  const cutoff = Date.now() - windowHours * 60 * 60 * 1000
+  const rows = db
+    .prepare(
+      `SELECT t.condition_id, b.token_id, b.ts, b.mid
+       FROM book_snapshots b
+       INNER JOIN tokens t ON t.token_id = b.token_id
+       WHERE b.ts >= ? AND b.mid IS NOT NULL
+       ORDER BY t.condition_id, b.token_id, b.ts`,
+    )
+    .all(cutoff) as Array<{ condition_id: string; token_id: string; ts: number; mid: number }>
+
+  // Group by condition_id, pick first token per condition, compute stddev of mid diffs.
+  const byCondition = new Map<string, { tokenId: string; series: Array<{ ts: number; mid: number }> }>()
+  for (const r of rows) {
+    let entry = byCondition.get(r.condition_id)
+    if (!entry) {
+      entry = { tokenId: r.token_id, series: [] }
+      byCondition.set(r.condition_id, entry)
+    }
+    if (entry.tokenId !== r.token_id) continue
+    entry.series.push({ ts: r.ts, mid: r.mid })
+  }
+
+  const out: Record<
+    string,
+    { conditionId: string; dailyStddevDollars: number; samples: number; hoursCovered: number }
+  > = {}
+
+  for (const [conditionId, { series }] of byCondition) {
+    if (series.length < 3) continue
+    const diffs: number[] = []
+    let intervalMs = 0
+    for (let i = 1; i < series.length; i++) {
+      diffs.push(series[i].mid - series[i - 1].mid)
+      intervalMs += series[i].ts - series[i - 1].ts
+    }
+    if (diffs.length === 0) continue
+
+    const mean = diffs.reduce((s, d) => s + d, 0) / diffs.length
+    const variance =
+      diffs.reduce((s, d) => s + (d - mean) ** 2, 0) / Math.max(1, diffs.length - 1)
+    const stepSigma = Math.sqrt(variance)
+
+    // Scale per-step σ to daily σ using √(bars per day).
+    const avgIntervalMs = intervalMs / diffs.length
+    const barsPerDay = avgIntervalMs > 0 ? (24 * 60 * 60 * 1000) / avgIntervalMs : 1
+    const dailyStddevDollars = stepSigma * Math.sqrt(barsPerDay)
+
+    const hoursCovered = (series[series.length - 1].ts - series[0].ts) / (60 * 60 * 1000)
+    out[conditionId] = {
+      conditionId,
+      dailyStddevDollars,
+      samples: series.length,
+      hoursCovered,
+    }
+  }
+  return out
+}
+
 export function getStats() {
   const db = getDb()
   const row = db.prepare(`

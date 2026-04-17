@@ -5,7 +5,7 @@ import type { IncomingMessage, ServerResponse } from 'http'
 import type { Plugin } from 'vite'
 import {
   getBookHistoryByMarket, getLatestBooks, getLatestMarkets,
-  getRewardHistory, getStats,
+  getMarketVolatility, getRewardHistory, getStats,
 } from './db.ts'
 
 function json(res: ServerResponse, data: unknown): void {
@@ -111,6 +111,10 @@ function handleRequest(req: IncomingMessage, res: ServerResponse, next: () => vo
       return json(res, apiMarketHistory(cid))
     }
     if (path === '/api/polymarket/stats') return json(res, getStats())
+    if (path === '/api/polymarket/volatility') {
+      const hours = Number(url.searchParams.get('hours') ?? '24') || 24
+      return json(res, { windowHours: hours, volatility: getMarketVolatility(hours) })
+    }
     next()
   } catch (err) {
     console.error('[polymarket-api]', err)

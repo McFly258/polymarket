@@ -1,5 +1,6 @@
 import type {
   BookSnapshot,
+  MarketVolatility,
   RewardsRow,
   SimulationResult,
   StrategyAllocation,
@@ -13,18 +14,30 @@ export const DEFAULT_STRATEGY: StrategyConfig = {
   minTicksBehindTop: 2,
   minYieldPct: 0.05,
   minDaysToResolution: 7,
+  // Polymarket CLOB is currently 0% maker/taker. Configurable so the strategy
+  // stays honest if that changes.
+  makerFeePct: 0,
+  takerFeePct: 0,
+  // Polymarket uses meta-transactions (relayer-paid gas), so user-visible gas
+  // per order is effectively 0. If you wanted to self-relay the tx cost would
+  // be ~$0.001 on Polygon — still negligible.
+  gasCostPerOrderUsd: 0,
+  // Reprice whenever the mid drifts more than 1 cent. Polymarket tick size is
+  // often 0.1¢ or 1¢; 1¢ is a reasonable default that avoids chasing noise.
+  repriceThresholdCents: 1,
+  // Hedge inventory on a fill by crossing the opposite side. Safer than carrying
+  // a directional book on a binary market, and matches how pros run these.
+  hedgeFillsOnBook: true,
 }
 
-/**
- * Polymarket rewards are paid proportionally to a size-weighted score inside the
- * reward zone (max_spread around mid). Their exact scoring function is piecewise,
- * but for sizing/allocation purposes a linear-decay approximation works fine:
- *
- *     weight(d) = max(0, 1 - d / max_spread)
- *
- * where d is the distance from mid and max_spread is in dollars. Size * weight
- * is summed per side to get the total score, and each side earns half the pool.
- */
+// ── Reward scoring ──────────────────────────────────────────────────────────
+// Polymarket pays rewards proportionally to a size-weighted score inside the
+// reward zone (max_spread around mid). Their exact scoring function is
+// piecewise; for allocation purposes a linear-decay approximation works fine:
+//     weight(d) = max(0, 1 - d / max_spread)
+// where d is the distance from mid and max_spread is in dollars. Size * weight
+// is summed per side to get the total score, and each side earns half the pool.
+
 function levelScore(priceDistanceFromMid: number, sizeUsd: number, maxSpreadDollars: number): number {
   if (priceDistanceFromMid < 0 || priceDistanceFromMid > maxSpreadDollars) return 0
   const weight = 1 - priceDistanceFromMid / maxSpreadDollars
@@ -58,21 +71,96 @@ function roundToTick(price: number, tick: number, dir: 'down' | 'up'): number {
   return fn(price / tick) * tick
 }
 
-/**
- * Price a single market allocation. We post on the YES outcome only.
- *
- * Goal: sit deep inside the reward zone but FAR from the touch price so resting
- * orders almost never fill. Specifically we anchor to mid ± postingDistancePct *
- * max_spread, then enforce minTicksBehindTop ticks of buffer behind the top of
- * book (so even if the touch drifts toward us we still won't be hit first).
- *
- * Each side deploys perMarketCapitalUsd / 2. Shares = halfCapital / price.
- */
-function allocateMarket(row: RewardsRow, config: StrategyConfig, now: number): StrategyAllocation | null {
+// ── Repositioning + fill cost model ─────────────────────────────────────────
+// Given a daily 1-sigma mid-move in dollars (σ) we can estimate:
+//
+// 1. Reprice frequency. We repost when the mid drifts more than
+//    repriceThreshold dollars. In a driftless Brownian motion the expected
+//    number of barrier crossings per day is approx (σ_daily / threshold)^2 / 2,
+//    but that blows up at small thresholds. A cleaner rule-of-thumb, consistent
+//    with empirical Polymarket behaviour: expected crossings ≈ σ / threshold.
+//    We clamp to a sensible range.
+//
+// 2. Fill probability. Our resting order sits d dollars behind the touch. The
+//    probability the mid moves past us within a day, one-sided, ≈ 2 * Φ(-d / σ),
+//    where Φ is the standard-normal CDF. Each side is independent in the Brownian
+//    approximation (fills on bid and fills on ask are disjoint random events).
+//
+// 3. Fill P&L. When our bid is hit, the mid has moved DOWN by at least d. We're
+//    long at bidPrice vs. a new mid ≤ bidPrice → mark-to-market loss per share
+//    ≈ d (floor; actual expected loss given a touch ≈ d + σ/√(2π), but we use d
+//    as a conservative lower bound). If we hedge on the book we pay half-spread
+//    plus takerFeePct to flip back to flat.
+
+function stdNormalCdf(x: number): number {
+  // Abramowitz & Stegun 7.1.26 approximation, max error ~7.5e-8.
+  const sign = x < 0 ? -1 : 1
+  const ax = Math.abs(x) / Math.SQRT2
+  const t = 1 / (1 + 0.3275911 * ax)
+  const y =
+    1 -
+    (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) *
+      t *
+      Math.exp(-ax * ax)
+  return 0.5 * (1 + sign * y)
+}
+
+interface CostInputs {
+  shares: number
+  price: number // our posted price
+  distanceFromMid: number // dollars
+  dailyVol: number // σ in dollars
+  config: StrategyConfig
+  bookSpread: number // $
+}
+
+interface SideCost {
+  fillProb: number
+  expectedLossUsd: number
+  expectedFeeUsd: number
+}
+
+function sideFillCost({ shares, price, distanceFromMid, dailyVol, config, bookSpread }: CostInputs): SideCost {
+  if (dailyVol <= 0 || distanceFromMid <= 0) {
+    return { fillProb: 0, expectedLossUsd: 0, expectedFeeUsd: 0 }
+  }
+  // One-sided hit probability within a day (Brownian, zero drift).
+  const fillProb = Math.min(1, 2 * stdNormalCdf(-distanceFromMid / dailyVol))
+  const notional = shares * price
+
+  // Maker fee charged on the fill.
+  const makerFee = notional * config.makerFeePct
+
+  // Mark-to-market loss from adverse mid move.
+  const mtmLoss = shares * distanceFromMid
+
+  // Hedging cost (cross the spread + taker fee) if we flatten post-fill.
+  const hedgeCost = config.hedgeFillsOnBook
+    ? shares * (bookSpread / 2) + notional * config.takerFeePct
+    : 0
+
+  const expectedLossUsd = fillProb * (mtmLoss + hedgeCost)
+  const expectedFeeUsd = fillProb * makerFee
+  return { fillProb, expectedLossUsd, expectedFeeUsd }
+}
+
+function repriceFrequencyPerDay(dailyVol: number, thresholdDollars: number): number {
+  if (dailyVol <= 0 || thresholdDollars <= 0) return 0
+  // σ / threshold, clamped to [0, 50] reprices/day. A $0.005 daily σ with a 1¢
+  // threshold implies ~0.5 reprices/day — realistic for a calm market.
+  const raw = dailyVol / thresholdDollars
+  return Math.max(0, Math.min(50, raw))
+}
+
+function allocateMarket(
+  row: RewardsRow,
+  config: StrategyConfig,
+  volatility: MarketVolatility | undefined,
+  now: number,
+): StrategyAllocation | null {
   const daysToResolution = daysUntil(row.endDateIso, now)
   const warnings: string[] = []
 
-  // Pick the YES-side book (first outcome) as the canonical one.
   const yesBook: BookSnapshot | undefined = row.books[0]
   if (!yesBook || yesBook.mid === null || yesBook.bestBid === null || yesBook.bestAsk === null) {
     return null
@@ -81,23 +169,16 @@ function allocateMarket(row: RewardsRow, config: StrategyConfig, now: number): S
   const maxSpreadDollars = row.rewardMaxSpread / 100
   const tick = row.minTickSize > 0 ? row.minTickSize : 0.01
   const mid = yesBook.mid
+  const bookSpread = yesBook.bestAsk - yesBook.bestBid
 
-  // Anchor postingDistancePct of the way from mid to the outer edge of the
-  // reward zone. e.g. 0.85 * 4¢ = 3.4¢ behind mid.
+  // Anchor posting depth inside the reward zone.
   const targetDistance = Math.max(tick, config.postingDistancePct * maxSpreadDollars)
-
   const bidAnchor = mid - targetDistance
   const askAnchor = mid + targetDistance
-
-  // Enforce a minimum tick buffer behind top of book so we're never the next
-  // resting level the market would chew through.
   const bidCap = yesBook.bestBid - config.minTicksBehindTop * tick
   const askCap = yesBook.bestAsk + config.minTicksBehindTop * tick
-
   const bidPriceRaw = Math.min(bidAnchor, bidCap)
   const askPriceRaw = Math.max(askAnchor, askCap)
-
-  // Round to the tick grid in the safer direction (lower bid, higher ask).
   const bidPrice = Math.max(tick, roundToTick(bidPriceRaw, tick, 'down'))
   const askPrice = Math.min(1 - tick, roundToTick(askPriceRaw, tick, 'up'))
 
@@ -111,28 +192,55 @@ function allocateMarket(row: RewardsRow, config: StrategyConfig, now: number): S
 
   const bidDistance = mid - bidPrice
   const askDistance = askPrice - mid
-
   if (bidDistance > maxSpreadDollars) warnings.push('bid outside reward zone')
   if (askDistance > maxSpreadDollars) warnings.push('ask outside reward zone')
 
   const bidDistanceFromTopCents = Math.max(0, (yesBook.bestBid - bidPrice) * 100)
   const askDistanceFromTopCents = Math.max(0, (askPrice - yesBook.bestAsk) * 100)
 
+  // ── Gross reward ──
   const ourBidScore = levelScore(bidDistance, bidPrice * bidShares, maxSpreadDollars)
   const ourAskScore = levelScore(askDistance, askPrice * askShares, maxSpreadDollars)
   const ourScore = ourBidScore + ourAskScore
-
   const competingBid = competingScoreForSide(yesBook.bids, mid, maxSpreadDollars, 'bid')
   const competingAsk = competingScoreForSide(yesBook.asks, mid, maxSpreadDollars, 'ask')
   const competingScore = competingBid + competingAsk
-
-  // Each side earns half the daily pool. Our per-side share = our_score / (our_score + competing_score).
   const bidSideShare = ourBidScore > 0 ? ourBidScore / (ourBidScore + competingBid) : 0
   const askSideShare = ourAskScore > 0 ? ourAskScore / (ourAskScore + competingAsk) : 0
-  const expectedDailyUsd = (row.dailyRate / 2) * bidSideShare + (row.dailyRate / 2) * askSideShare
+  const grossDailyUsd = (row.dailyRate / 2) * bidSideShare + (row.dailyRate / 2) * askSideShare
 
+  // ── Costs from volatility-driven reposting + fills ──
+  const dailyVol = volatility?.dailyStddevDollars ?? 0
+
+  const bidCost = sideFillCost({
+    shares: bidShares,
+    price: bidPrice,
+    distanceFromMid: bidDistance,
+    dailyVol,
+    config,
+    bookSpread,
+  })
+  const askCost = sideFillCost({
+    shares: askShares,
+    price: askPrice,
+    distanceFromMid: askDistance,
+    dailyVol,
+    config,
+    bookSpread,
+  })
+  const expectedFillCostUsd =
+    bidCost.expectedLossUsd + bidCost.expectedFeeUsd + askCost.expectedLossUsd + askCost.expectedFeeUsd
+
+  const repricesPerDay = repriceFrequencyPerDay(dailyVol, config.repriceThresholdCents / 100)
+  // Each reprice = cancel+repost on both sides = 4 order ops.
+  const expectedRepriceCostUsd = repricesPerDay * 4 * config.gasCostPerOrderUsd
+
+  const netDailyUsd = grossDailyUsd - expectedFillCostUsd - expectedRepriceCostUsd
   const capitalUsd = config.perMarketCapitalUsd
-  const yieldPctDaily = capitalUsd > 0 ? (expectedDailyUsd / capitalUsd) * 100 : 0
+  const yieldPctDaily = capitalUsd > 0 ? (netDailyUsd / capitalUsd) * 100 : 0
+
+  if (dailyVol === 0) warnings.push('no volatility history — costs assumed 0')
+  if (expectedFillCostUsd > grossDailyUsd) warnings.push('fill risk exceeds gross reward')
 
   return {
     conditionId: row.conditionId,
@@ -150,14 +258,24 @@ function allocateMarket(row: RewardsRow, config: StrategyConfig, now: number): S
     sharesPerSide: Math.min(bidShares, askShares),
     ourScore,
     competingScore,
-    expectedDailyUsd,
+    grossDailyUsd,
+    expectedDailyUsd: netDailyUsd,
     capitalUsd,
     yieldPctDaily,
+    dailyVolUsd: dailyVol,
+    expectedRepricesPerDay: repricesPerDay,
+    expectedRepriceCostUsd,
+    expectedFillsPerDayPerSide: (bidCost.fillProb + askCost.fillProb) / 2,
+    expectedFillCostUsd,
     warnings,
   }
 }
 
-export function runSimulation(rows: RewardsRow[], config: StrategyConfig): SimulationResult {
+export function runSimulation(
+  rows: RewardsRow[],
+  config: StrategyConfig,
+  volatility: Record<string, MarketVolatility> = {},
+): SimulationResult {
   const now = Date.now()
 
   const candidates = rows
@@ -166,7 +284,7 @@ export function runSimulation(rows: RewardsRow[], config: StrategyConfig): Simul
       const days = daysUntil(r.endDateIso, now)
       return days === null || days >= config.minDaysToResolution
     })
-    .map((r) => allocateMarket(r, config, now))
+    .map((r) => allocateMarket(r, config, volatility[r.conditionId], now))
     .filter((a): a is StrategyAllocation => a !== null)
     .filter((a) => a.warnings.every((w) => !w.includes('outside reward zone')))
     .filter((a) => a.expectedDailyUsd > 0)
@@ -182,14 +300,21 @@ export function runSimulation(rows: RewardsRow[], config: StrategyConfig): Simul
   }
 
   const deployedCapital = allocations.reduce((s, a) => s + a.capitalUsd, 0)
+  const grossDailyUsd = allocations.reduce((s, a) => s + a.grossDailyUsd, 0)
   const expectedDailyUsd = allocations.reduce((s, a) => s + a.expectedDailyUsd, 0)
+  const totalCostUsd = allocations.reduce(
+    (s, a) => s + a.expectedFillCostUsd + a.expectedRepriceCostUsd,
+    0,
+  )
   const portfolioYieldPctDaily = deployedCapital > 0 ? (expectedDailyUsd / deployedCapital) * 100 : 0
 
   return {
     config,
     allocations,
     deployedCapital,
+    grossDailyUsd,
     expectedDailyUsd,
     portfolioYieldPctDaily,
+    totalCostUsd,
   }
 }

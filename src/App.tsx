@@ -1,7 +1,7 @@
 import { useCallback, useDeferredValue, useEffect, useMemo, useState } from 'react'
 import './App.css'
 import { REFRESH_MS } from './constants'
-import type { DashboardData, StrategyConfig } from './types'
+import type { DashboardData, MarketVolatility, StrategyConfig } from './types'
 import { loadDashboard } from './services/dashboard'
 import { DEFAULT_STRATEGY } from './services/strategy'
 import { HeroPanel } from './components/HeroPanel'
@@ -21,6 +21,7 @@ function App() {
   const [minDaily, setMinDaily] = useState(0)
   const [selectedMarketId, setSelectedMarketId] = useState<string | null>(null)
   const [strategyConfig, setStrategyConfig] = useState<StrategyConfig>(DEFAULT_STRATEGY)
+  const [volatility, setVolatility] = useState<Record<string, MarketVolatility>>({})
 
   const refresh = useCallback(async () => {
     try {
@@ -28,6 +29,18 @@ function App() {
       setError(null)
       const next = await loadDashboard()
       setData(next)
+      try {
+        const resp = await fetch('/api/polymarket/volatility?hours=24')
+        if (resp.ok) {
+          const payload = (await resp.json()) as {
+            volatility: Record<string, MarketVolatility>
+          }
+          setVolatility(payload.volatility ?? {})
+        }
+      } catch {
+        // Volatility endpoint requires the collector DB — fail silent, strategy
+        // will warn per-row when σ is missing.
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unknown error')
     } finally {
@@ -72,6 +85,7 @@ function App() {
         rows={data?.rows ?? []}
         config={strategyConfig}
         onConfigChange={setStrategyConfig}
+        volatility={volatility}
       />
 
       <FilterBar
