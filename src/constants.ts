@@ -1,5 +1,5 @@
 export const CLOB_BASE = '/clob-api'
-export const REFRESH_MS = 60_000
+export const REFRESH_MS = 3 * 60_000
 
 // USDC on Polygon — the asset rewards are paid in
 export const USDC_POLYGON = '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174'
