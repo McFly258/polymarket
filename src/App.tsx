@@ -16,6 +16,8 @@ import { FilterBar } from './components/FilterBar'
 import { RewardsTable } from './components/RewardsTable'
 import { MarketHistoryPanel } from './components/MarketHistoryPanel'
 import { SimulationPanel } from './components/SimulationPanel'
+import { PaperTradingPanel } from './components/PaperTradingPanel'
+import { getPaperEngine } from './services/paperTrading'
 
 // How often we re-derive the dashboard rows from the live books map. WS events
 // can arrive dozens of times per second — we throttle rather than render on
@@ -113,11 +115,15 @@ function App() {
     if (!data) return
     const tokenIds = collectTokenIds(marketsRef.current)
     if (tokenIds.length === 0) return
+    const engine = getPaperEngine()
     const client = startMarketStream(tokenIds, {
       seedBooks: booksRef.current,
       onBook: (tokenId, view) => {
         booksRef.current.set(tokenId, view)
         dirtyRef.current = true
+        // Feed the paper engine first so fill detection happens at WS speed,
+        // independent of the 1s table re-derive throttle.
+        engine.evaluateBook(tokenId, view)
       },
       onStatus: (state, info) => {
         setWsState(state)
@@ -165,6 +171,12 @@ function App() {
         rows={data?.rows ?? []}
         config={strategyConfig}
         onConfigChange={setStrategyConfig}
+        volatility={volatility}
+      />
+
+      <PaperTradingPanel
+        rows={data?.rows ?? []}
+        config={strategyConfig}
         volatility={volatility}
       />
 
