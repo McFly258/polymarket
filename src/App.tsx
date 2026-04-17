@@ -81,11 +81,18 @@ function App() {
       {selectedMarketId && (() => {
         const row = data?.rows.find((r) => r.conditionId === selectedMarketId)
         return row ? (
-          <MarketHistoryPanel
-            conditionId={selectedMarketId}
-            question={row.question}
-            onClose={() => setSelectedMarketId(null)}
-          />
+          <div
+            className="history-panel-backdrop"
+            onClick={() => setSelectedMarketId(null)}
+          >
+            <div onClick={(e) => e.stopPropagation()}>
+              <MarketHistoryPanel
+                conditionId={selectedMarketId}
+                question={row.question}
+                onClose={() => setSelectedMarketId(null)}
+              />
+            </div>
+          </div>
         ) : null
       })()}
     </main>

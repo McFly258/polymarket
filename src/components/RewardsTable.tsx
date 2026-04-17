@@ -85,7 +85,6 @@ export function RewardsTable({ rows, loading, selectedId, onSelect }: Props) {
                     href={`https://polymarket.com/event/${row.slug}`}
                     target="_blank"
                     rel="noreferrer"
-                    onClick={(e) => e.stopPropagation()}
                   >
                     {row.question}
                   </a>
