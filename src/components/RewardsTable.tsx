@@ -1,3 +1,4 @@
+import { memo, useState } from 'react'
 import { formatCents, formatEndDate, formatMaxSpread, formatPrice, formatUsd } from '../constants'
 import type { BookSnapshot, RewardsRow } from '../types'
 
@@ -7,6 +8,9 @@ type Props = {
   selectedId: string | null
   onSelect: (id: string | null) => void
 }
+
+const INITIAL_VISIBLE = 150
+const PAGE_STEP = 150
 
 function SideChip({ book }: { book: BookSnapshot }) {
   const cls =
@@ -45,7 +49,50 @@ function StatusBadge({ row }: { row: RewardsRow }) {
   return <span className="badge badge-off">out</span>
 }
 
+type RowProps = {
+  row: RewardsRow
+  selected: boolean
+  onSelect: (id: string | null) => void
+}
+
+const MarketRow = memo(function MarketRow({ row, selected, onSelect }: RowProps) {
+  return (
+    <tr
+      className={selected ? 'row-selected' : 'row-clickable'}
+      onClick={() => onSelect(selected ? null : row.conditionId)}
+    >
+      <td className="question-cell">
+        <a
+          href={`https://polymarket.com/event/${row.slug}`}
+          target="_blank"
+          rel="noreferrer"
+        >
+          {row.question}
+        </a>
+        <div className="question-meta">{row.tags.slice(0, 4).join(' · ') || '—'}</div>
+      </td>
+      <td className="num">{formatUsd(row.dailyRate)}</td>
+      <td className="num">{formatMaxSpread(row.rewardMaxSpread)}</td>
+      <td className="num">{row.rewardMinSize}</td>
+      <td className="num">{formatCents(row.minTickSize)}</td>
+      <td>
+        <div className="side-grid">
+          {row.books.map((b) => (
+            <SideChip key={b.tokenId} book={b} />
+          ))}
+        </div>
+      </td>
+      <td><StatusBadge row={row} /></td>
+      <td className="dim">{formatEndDate(row.endDateIso)}</td>
+    </tr>
+  )
+})
+
 export function RewardsTable({ rows, loading, selectedId, onSelect }: Props) {
+  const [visible, setVisible] = useState(INITIAL_VISIBLE)
+  const shown = rows.slice(0, visible)
+  const hiddenCount = Math.max(0, rows.length - shown.length)
+
   return (
     <article className="panel table-panel">
       <div className="panel-header">
@@ -53,7 +100,10 @@ export function RewardsTable({ rows, loading, selectedId, onSelect }: Props) {
           <h2>Reward-eligible markets</h2>
           <p>
             Sorted by daily USDC pool. A market is &ldquo;in-band&rdquo; when the current book
-            spread on every outcome fits inside 2× the max reward spread.
+            spread on every outcome fits inside 2× the max reward spread.{' '}
+            <span className="dim">
+              Showing {shown.length.toLocaleString()} of {rows.length.toLocaleString()}.
+            </span>
           </p>
         </div>
         {loading ? <span className="helper-text">Refreshing…</span> : null}
@@ -74,38 +124,13 @@ export function RewardsTable({ rows, loading, selectedId, onSelect }: Props) {
             </tr>
           </thead>
           <tbody>
-            {rows.map((row) => (
-              <tr
+            {shown.map((row) => (
+              <MarketRow
                 key={row.conditionId}
-                className={selectedId === row.conditionId ? 'row-selected' : 'row-clickable'}
-                onClick={() => onSelect(selectedId === row.conditionId ? null : row.conditionId)}
-              >
-                <td className="question-cell">
-                  <a
-                    href={`https://polymarket.com/event/${row.slug}`}
-                    target="_blank"
-                    rel="noreferrer"
-                  >
-                    {row.question}
-                  </a>
-                  <div className="question-meta">
-                    {row.tags.slice(0, 4).join(' · ') || '—'}
-                  </div>
-                </td>
-                <td className="num">{formatUsd(row.dailyRate)}</td>
-                <td className="num">{formatMaxSpread(row.rewardMaxSpread)}</td>
-                <td className="num">{row.rewardMinSize}</td>
-                <td className="num">{formatCents(row.minTickSize)}</td>
-                <td>
-                  <div className="side-grid">
-                    {row.books.map((b) => (
-                      <SideChip key={b.tokenId} book={b} />
-                    ))}
-                  </div>
-                </td>
-                <td><StatusBadge row={row} /></td>
-                <td className="dim">{formatEndDate(row.endDateIso)}</td>
-              </tr>
+                row={row}
+                selected={selectedId === row.conditionId}
+                onSelect={onSelect}
+              />
             ))}
             {rows.length === 0 && !loading ? (
               <tr><td colSpan={8} className="dim" style={{ textAlign: 'center', padding: 40 }}>
@@ -115,6 +140,28 @@ export function RewardsTable({ rows, loading, selectedId, onSelect }: Props) {
           </tbody>
         </table>
       </div>
+
+      {hiddenCount > 0 ? (
+        <div className="table-footer">
+          <button
+            type="button"
+            className="refresh-button"
+            onClick={() => setVisible((v) => v + PAGE_STEP)}
+          >
+            Show next {Math.min(PAGE_STEP, hiddenCount)}
+          </button>
+          <button
+            type="button"
+            className="refresh-button"
+            onClick={() => setVisible(rows.length)}
+          >
+            Show all {rows.length.toLocaleString()}
+          </button>
+          <span className="helper-text dim">
+            {hiddenCount.toLocaleString()} more hidden — rendering everything at once is slow.
+          </span>
+        </div>
+      ) : null}
     </article>
   )
 }

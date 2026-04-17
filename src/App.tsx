@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useDeferredValue, useEffect, useMemo, useState } from 'react'
 import './App.css'
 import { REFRESH_MS } from './constants'
 import type { DashboardData, StrategyConfig } from './types'
@@ -41,17 +41,20 @@ function App() {
     return () => window.clearInterval(id)
   }, [refresh])
 
+  const deferredQuery = useDeferredValue(query)
+  const deferredMinDaily = useDeferredValue(minDaily)
+
   const filteredRows = useMemo(() => {
     const rows = data?.rows ?? []
-    const q = query.trim().toLowerCase()
+    const q = deferredQuery.trim().toLowerCase()
     return rows.filter((r) => {
-      if (r.dailyRate < minDaily) return false
+      if (r.dailyRate < deferredMinDaily) return false
       if (onlyEligible && r.eligibleSides !== r.books.length) return false
       if (!q) return true
       const hay = `${r.question} ${r.slug} ${r.tags.join(' ')}`.toLowerCase()
       return hay.includes(q)
     })
-  }, [data, query, onlyEligible, minDaily])
+  }, [data, deferredQuery, onlyEligible, deferredMinDaily])
 
   return (
     <main className="app-shell">
