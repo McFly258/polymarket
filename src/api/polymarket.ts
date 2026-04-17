@@ -36,22 +36,36 @@ export async function fetchRewardMarkets(): Promise<RawMarket[]> {
   return all
 }
 
+export interface BookLevel {
+  price: number
+  size: number
+}
+
 export interface BookView {
   bestBid: number | null
   bestAsk: number | null
   mid: number | null
   spread: number | null
+  bids: BookLevel[]
+  asks: BookLevel[]
 }
 
 function parseBook(book: RawBook): BookView {
-  // CLOB returns bids ascending (best last) and asks descending (best last)
-  const lastBid = book.bids.at(-1)
-  const lastAsk = book.asks.at(-1)
-  const bestBid = lastBid ? parseFloat(lastBid.price) : null
-  const bestAsk = lastAsk ? parseFloat(lastAsk.price) : null
+  // CLOB returns bids ascending (best last) and asks descending (best last).
+  // Normalise: bids sorted descending (best first), asks sorted ascending (best first).
+  const bids: BookLevel[] = (book.bids ?? [])
+    .map((l) => ({ price: parseFloat(l.price), size: parseFloat(l.size) }))
+    .filter((l) => Number.isFinite(l.price) && Number.isFinite(l.size))
+    .sort((a, b) => b.price - a.price)
+  const asks: BookLevel[] = (book.asks ?? [])
+    .map((l) => ({ price: parseFloat(l.price), size: parseFloat(l.size) }))
+    .filter((l) => Number.isFinite(l.price) && Number.isFinite(l.size))
+    .sort((a, b) => a.price - b.price)
+  const bestBid = bids[0]?.price ?? null
+  const bestAsk = asks[0]?.price ?? null
   const mid = bestBid !== null && bestAsk !== null ? (bestBid + bestAsk) / 2 : null
   const spread = bestBid !== null && bestAsk !== null ? bestAsk - bestBid : null
-  return { bestBid, bestAsk, mid, spread }
+  return { bestBid, bestAsk, mid, spread, bids, asks }
 }
 
 const BOOK_BATCH = 100

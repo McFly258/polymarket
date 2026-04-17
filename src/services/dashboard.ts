@@ -36,12 +36,29 @@ export async function loadDashboard(): Promise<DashboardData> {
   const books = await fetchBooks(tokenIds)
 
   const rows: RewardsRow[] = active.map((market) => {
+    const maxSpreadDollars = market.rewards.max_spread / 100
     const bookSnapshots: BookSnapshot[] = market.tokens.map((token) => {
       const book = books.get(token.token_id)
       const bestBid = book?.bestBid ?? null
       const bestAsk = book?.bestAsk ?? null
       const mid = book?.mid ?? null
       const spread = book?.spread ?? null
+
+      let qualifyingBidDepthUsd = 0
+      let qualifyingAskDepthUsd = 0
+      if (book && mid !== null) {
+        for (const lvl of book.bids) {
+          if (mid - lvl.price <= maxSpreadDollars) {
+            qualifyingBidDepthUsd += lvl.price * lvl.size
+          }
+        }
+        for (const lvl of book.asks) {
+          if (lvl.price - mid <= maxSpreadDollars) {
+            qualifyingAskDepthUsd += lvl.price * lvl.size
+          }
+        }
+      }
+
       return {
         tokenId: token.token_id,
         outcome: token.outcome,
@@ -51,6 +68,10 @@ export async function loadDashboard(): Promise<DashboardData> {
         mid,
         spread,
         withinRewardSpread: withinRewardSpread(spread, market.rewards.max_spread),
+        qualifyingBidDepthUsd,
+        qualifyingAskDepthUsd,
+        bids: book?.bids ?? [],
+        asks: book?.asks ?? [],
       }
     })
 

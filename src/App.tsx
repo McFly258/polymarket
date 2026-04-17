@@ -1,13 +1,15 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import './App.css'
 import { REFRESH_MS } from './constants'
-import type { DashboardData } from './types'
+import type { DashboardData, StrategyConfig } from './types'
 import { loadDashboard } from './services/dashboard'
+import { DEFAULT_STRATEGY } from './services/strategy'
 import { HeroPanel } from './components/HeroPanel'
 import { StatCards } from './components/StatCards'
 import { FilterBar } from './components/FilterBar'
 import { RewardsTable } from './components/RewardsTable'
 import { MarketHistoryPanel } from './components/MarketHistoryPanel'
+import { SimulationPanel } from './components/SimulationPanel'
 
 function App() {
   const [data, setData] = useState<DashboardData | null>(null)
@@ -18,6 +20,7 @@ function App() {
   const [onlyEligible, setOnlyEligible] = useState(false)
   const [minDaily, setMinDaily] = useState(0)
   const [selectedMarketId, setSelectedMarketId] = useState<string | null>(null)
+  const [strategyConfig, setStrategyConfig] = useState<StrategyConfig>(DEFAULT_STRATEGY)
 
   const refresh = useCallback(async () => {
     try {
@@ -61,6 +64,12 @@ function App() {
       {error ? <section className="error-banner">{error}</section> : null}
 
       <StatCards data={data} />
+
+      <SimulationPanel
+        rows={data?.rows ?? []}
+        config={strategyConfig}
+        onConfigChange={setStrategyConfig}
+      />
 
       <FilterBar
         query={query}

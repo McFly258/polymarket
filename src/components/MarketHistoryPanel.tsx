@@ -90,23 +90,40 @@ function RewardHistory({ points }: { points: RewardHistoryPoint[] }) {
   )
 }
 
+type FetchState =
+  | { status: 'loading' }
+  | { status: 'ready'; data: MarketHistoryData }
+  | { status: 'error'; message: string }
+
 export function MarketHistoryPanel({ conditionId, question, onClose }: Props) {
-  const [data, setData] = useState<MarketHistoryData | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
+  const [state, setState] = useState<FetchState>({ status: 'loading' })
+  const [activeId, setActiveId] = useState(conditionId)
+
+  // React 19 idiom: reset derived state synchronously when a prop changes.
+  if (activeId !== conditionId) {
+    setActiveId(conditionId)
+    setState({ status: 'loading' })
+  }
 
   useEffect(() => {
-    setLoading(true)
-    setError(null)
+    let cancelled = false
     fetch(`/api/polymarket/market-history?condition_id=${encodeURIComponent(conditionId)}`)
       .then((r) => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`)
         return r.json() as Promise<MarketHistoryData>
       })
-      .then(setData)
-      .catch((e: unknown) => setError(e instanceof Error ? e.message : 'Failed to load history'))
-      .finally(() => setLoading(false))
+      .then((d) => { if (!cancelled) setState({ status: 'ready', data: d }) })
+      .catch((e: unknown) => {
+        if (!cancelled) {
+          setState({ status: 'error', message: e instanceof Error ? e.message : 'Failed to load history' })
+        }
+      })
+    return () => { cancelled = true }
   }, [conditionId])
+
+  const data = state.status === 'ready' ? state.data : null
+  const loading = state.status === 'loading'
+  const error = state.status === 'error' ? state.message : null
 
   const outcomes = data
     ? [...new Set(data.books.map((b) => b.outcome))].map((outcome) => ({
