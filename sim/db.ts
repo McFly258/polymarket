@@ -324,6 +324,29 @@ export function clearFills(): void {
   getDb().prepare(`DELETE FROM paper_fills`).run()
 }
 
+export function readAllFills(limit = 10_000): FillRow[] {
+  const rows = getDb()
+    .prepare(
+      `SELECT id, order_id, condition_id, question, side, fill_price, size, hedge_price,
+              realised_pnl_usd, maker_fee_usd, taker_fee_usd, filled_at, hedge_order_id, hedge_status
+       FROM paper_fills
+       ORDER BY filled_at ASC
+       LIMIT ?`,
+    )
+    .all(limit) as Array<{
+      id: string; order_id: string; condition_id: string; question: string; side: 'bid' | 'ask';
+      fill_price: number; size: number; hedge_price: number;
+      realised_pnl_usd: number; maker_fee_usd: number; taker_fee_usd: number;
+      filled_at: number; hedge_order_id: string | null; hedge_status: 'pending' | 'done' | 'failed'
+    }>
+  return rows.map((r) => ({
+    id: r.id, orderId: r.order_id, conditionId: r.condition_id, question: r.question, side: r.side,
+    fillPrice: r.fill_price, size: r.size, hedgePrice: r.hedge_price,
+    realisedPnlUsd: r.realised_pnl_usd, makerFeeUsd: r.maker_fee_usd, takerFeeUsd: r.taker_fee_usd,
+    filledAt: r.filled_at, hedgeOrderId: r.hedge_order_id, hedgeStatus: r.hedge_status,
+  }))
+}
+
 // ── Positions ─────────────────────────────────────────────────────────
 
 export interface PositionRow {

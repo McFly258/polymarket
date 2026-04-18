@@ -65,6 +65,23 @@ function toPosition(p: ServerPositionRow): PaperPosition {
   }
 }
 
+export interface RewardHourlyPoint {
+  hourEpoch: number
+  snapshotAt: number
+  totalEarnedUsd: number
+  ratePerDay: number
+}
+
+export interface PositionRewardHourlyPoint {
+  hourEpoch: number
+  snapshotAt: number
+  conditionId: string
+  question: string
+  rewardSharePct: number
+  expectedRatePerDay: number
+  earnedThisHourUsd: number
+}
+
 export interface BackendEngineClient {
   snapshot(): EngineSnapshot
   subscribe(fn: () => void): () => void
@@ -73,6 +90,9 @@ export interface BackendEngineClient {
   resetHistory(): Promise<void>
   /** Null when we haven't reached the server yet. */
   lastError(): string | null
+  fetchRewardHistory(limit?: number): Promise<RewardHourlyPoint[]>
+  fetchPositionRewardHistory(conditionId?: string, limit?: number): Promise<PositionRewardHourlyPoint[]>
+  fetchFillsHistory(limit?: number): Promise<FillEvent[]>
 }
 
 function emptySnapshot(): EngineSnapshot {
@@ -133,6 +153,27 @@ class BackendEngineClientImpl implements BackendEngineClient {
     const res = await fetch(`${BASE}/reset`, { method: 'POST' })
     if (!res.ok) throw new Error(`reset failed: ${res.status}`)
     await this.poll()
+  }
+
+  async fetchRewardHistory(limit = 168): Promise<RewardHourlyPoint[]> {
+    const res = await fetch(`${BASE}/reward-history?limit=${limit}`)
+    if (!res.ok) throw new Error(`reward-history ${res.status}`)
+    return (await res.json()) as RewardHourlyPoint[]
+  }
+
+  async fetchPositionRewardHistory(conditionId?: string, limit = 168): Promise<PositionRewardHourlyPoint[]> {
+    const qs = new URLSearchParams({ limit: String(limit) })
+    if (conditionId) qs.set('conditionId', conditionId)
+    const res = await fetch(`${BASE}/position-reward-history?${qs.toString()}`)
+    if (!res.ok) throw new Error(`position-reward-history ${res.status}`)
+    return (await res.json()) as PositionRewardHourlyPoint[]
+  }
+
+  async fetchFillsHistory(limit = 10_000): Promise<FillEvent[]> {
+    const res = await fetch(`${BASE}/fills-history?limit=${limit}`)
+    if (!res.ok) throw new Error(`fills-history ${res.status}`)
+    const rows = (await res.json()) as ServerFillRow[]
+    return rows.map(toFill)
   }
 
   private async poll(): Promise<void> {

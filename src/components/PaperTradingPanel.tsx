@@ -3,6 +3,7 @@ import { formatPrice, formatUsd } from '../constants'
 import { getBackendEngine, type BackendEngineClient } from '../services/backendEngine'
 import { getPaperEngine, type EngineSnapshot } from '../services/paperTrading'
 import type { RewardsRow, SimulationResult, StrategyConfig } from '../types'
+import { PnLChart } from './PnLChart'
 
 interface Props {
   rows: RewardsRow[]
@@ -93,6 +94,14 @@ export function PaperTradingPanel({ rows, config, sim }: Props) {
     const id = window.setInterval(() => setNow((n) => n + 1), 1000)
     return () => window.clearInterval(id)
   }, [snap.state])
+
+  // Bump chart refresh key every 5 minutes so the PnL chart re-fetches
+  // hourly snapshots + fills history without thrashing the backend.
+  const [chartRefreshKey, setChartRefreshKey] = useState(0)
+  useEffect(() => {
+    const id = window.setInterval(() => setChartRefreshKey((n) => n + 1), 5 * 60_000)
+    return () => window.clearInterval(id)
+  }, [])
 
   const totalPnl = useMemo(
     () => snap.fills.reduce((s, f) => s + f.realisedPnlUsd, 0),
@@ -211,6 +220,8 @@ export function PaperTradingPanel({ rows, config, sim }: Props) {
           </div>
         </div>
       </section>
+
+      <PnLChart refreshKey={chartRefreshKey} />
 
       <h3 className="panel-subhead">Active positions</h3>
       <div className="table-wrap">
