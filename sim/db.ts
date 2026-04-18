@@ -324,6 +324,18 @@ export function clearFills(): void {
   getDb().prepare(`DELETE FROM paper_fills`).run()
 }
 
+/** Wipe every paper_ table and reset singletons to zero — full clean slate. */
+export function fullReset(now: number): void {
+  const db = getDb()
+  db.prepare(`DELETE FROM paper_fills`).run()
+  db.prepare(`DELETE FROM paper_orders`).run()
+  db.prepare(`DELETE FROM paper_positions`).run()
+  db.prepare(`DELETE FROM paper_reward_hourly`).run()
+  db.prepare(`DELETE FROM paper_position_reward_hourly`).run()
+  writeReward({ totalEarnedUsd: 0, lastRatePerDay: 0, lastUpdatedAt: now })
+  writeEngineState({ state: 'idle', startedAt: null, configJson: null, lastAllocAt: null })
+}
+
 export function readAllFills(limit = 10_000): FillRow[] {
   const rows = getDb()
     .prepare(

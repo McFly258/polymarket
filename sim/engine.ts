@@ -39,6 +39,7 @@ import {
   clearAllPositions,
   clearFills,
   deletePosition,
+  fullReset,
   insertFill,
   insertOrder,
   insertPositionRewardHourly,
@@ -77,6 +78,18 @@ const MAX_HEDGE_SLIPPAGE = 0.10
 //      order size in visible depth (top-10 levels). Guards against thin books
 //      that pass C1 and C2a but have no real liquidity behind the top quote.
 const MIN_HEDGE_DEPTH_RATIO = 5
+
+// C5: minimum book activity — proxy for recent trading volume.
+//     Each side needs at least this many price levels AND this many total shares.
+//     Markets with 1–2 stale quotes have no real activity.
+const MIN_BOOK_LEVELS = 3
+const MIN_BOOK_DEPTH_SHARES = 100
+
+// C7: binary-extreme exclusion.
+//     Markets near certainty (mid > MAX_MID_PRICE) or near-zero (mid < MIN_MID_PRICE)
+//     carry asymmetric resolution risk that overwhelms reward accrual.
+const MIN_MID_PRICE = 0.05
+const MAX_MID_PRICE = 0.95
 
 function dailyRateFor(market: Market): number {
   const rates = market.rewards?.rates
@@ -301,11 +314,11 @@ export class BackendPaperEngine {
 
   resetHistory(): void {
     if (this.state === 'running') throw new Error('stop the engine before resetting history')
-    clearFills()
-    resetReward(Date.now())
+    const now = Date.now()
+    fullReset(now)
     this.rewardTotal = 0
     this.rewardLastRate = 0
-    this.rewardLastUpdatedAt = Date.now()
+    this.rewardLastUpdatedAt = now
   }
 
   /** Pull the current engine snapshot straight from SQLite — what the HTTP
@@ -419,6 +432,27 @@ export class BackendPaperEngine {
     }
     if (askDepth < MIN_HEDGE_DEPTH_RATIO * askSize) {
       console.log(`[engine] skip ${tag} — C2b ask depth ${askDepth.toFixed(0)} < ${(MIN_HEDGE_DEPTH_RATIO * askSize).toFixed(0)}`)
+      return
+    }
+
+    // C5: book activity — require enough price levels and total depth as a
+    //     proxy for recent trading volume. Ghost markets have 1–2 stale quotes.
+    if (yesBook.bids.length < MIN_BOOK_LEVELS || yesBook.asks.length < MIN_BOOK_LEVELS) {
+      console.log(`[engine] skip ${tag} — C5 book levels (bids=${yesBook.bids.length} asks=${yesBook.asks.length} min=${MIN_BOOK_LEVELS})`)
+      return
+    }
+    const totalBidShares = yesBook.bids.reduce((s, l) => s + l.size, 0)
+    const totalAskShares = yesBook.asks.reduce((s, l) => s + l.size, 0)
+    if (totalBidShares < MIN_BOOK_DEPTH_SHARES || totalAskShares < MIN_BOOK_DEPTH_SHARES) {
+      console.log(`[engine] skip ${tag} — C5 total depth (bids=${totalBidShares.toFixed(0)} asks=${totalAskShares.toFixed(0)} min=${MIN_BOOK_DEPTH_SHARES})`)
+      return
+    }
+
+    // C7: binary-extreme exclusion — near-certain or near-impossible markets
+    //     have asymmetric resolution risk that reward accrual can't offset.
+    const mid = yesBook.mid
+    if (mid !== null && (mid < MIN_MID_PRICE || mid > MAX_MID_PRICE)) {
+      console.log(`[engine] skip ${tag} — C7 binary extreme (mid=${mid.toFixed(3)})`)
       return
     }
 
