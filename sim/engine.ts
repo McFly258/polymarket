@@ -41,6 +41,7 @@ import {
   deletePosition,
   insertFill,
   insertOrder,
+  insertPositionRewardHourly,
   readEngineState,
   readPositions,
   readRecentFills,
@@ -50,6 +51,7 @@ import {
   updateFillHedge,
   updateOrderStatus,
   upsertPosition,
+  upsertRewardHourly,
   writeEngineState,
   writeReward,
   type FillRow,
@@ -204,6 +206,8 @@ interface InternalPosition {
   bestAsk: number | null
   rewardSharePct: number
   expectedRatePerDay: number
+  totalEarnedUsd: number
+  earnedSinceLastSnapshot: number
   ourScore: number
   totalScore: number
   latestBook: BookView | null
@@ -221,6 +225,7 @@ export class BackendPaperEngine {
   private rewardLastUpdatedAt = Date.now()
   private rewardTimer: NodeJS.Timeout | null = null
   private reallocTimer: NodeJS.Timeout | null = null
+  private hourlySnapshotTimer: NodeJS.Timeout | null = null
   private ws: WsClient | null = null
   private readonly broker: Broker
 
@@ -267,6 +272,7 @@ export class BackendPaperEngine {
     await this.reallocate()
     this.scheduleRewardTick()
     this.scheduleRealloc()
+    this.scheduleHourlySnapshot()
     console.log(`[engine] started — ${this.positions.size} positions, uptime anchor ${new Date(this.startedAt).toISOString()}`)
   }
 
@@ -276,6 +282,7 @@ export class BackendPaperEngine {
 
     if (this.rewardTimer) { clearInterval(this.rewardTimer); this.rewardTimer = null }
     if (this.reallocTimer) { clearInterval(this.reallocTimer); this.reallocTimer = null }
+    if (this.hourlySnapshotTimer) { clearInterval(this.hourlySnapshotTimer); this.hourlySnapshotTimer = null }
     if (this.ws) { this.ws.stop(); this.ws = null }
 
     const now = Date.now()
@@ -468,6 +475,8 @@ export class BackendPaperEngine {
       bestAsk: yesBook.bestAsk,
       rewardSharePct: 0,
       expectedRatePerDay: 0,
+      totalEarnedUsd: 0,
+      earnedSinceLastSnapshot: 0,
       ourScore: 0,
       totalScore: 0,
       latestBook: null,
@@ -577,11 +586,52 @@ export class BackendPaperEngine {
     this.reallocTimer = setInterval(() => { void this.reallocate() }, REALLOC_MS)
   }
 
+  private scheduleHourlySnapshot(): void {
+    if (this.hourlySnapshotTimer) clearInterval(this.hourlySnapshotTimer)
+    // Fire once per hour, aligned to the top of the hour.
+    const msUntilNextHour = 3_600_000 - (Date.now() % 3_600_000)
+    setTimeout(() => {
+      this.takeHourlySnapshot()
+      this.hourlySnapshotTimer = setInterval(() => this.takeHourlySnapshot(), 3_600_000)
+    }, msUntilNextHour)
+  }
+
+  private takeHourlySnapshot(): void {
+    if (this.state !== 'running') return
+    const now = Date.now()
+    const hourEpoch = Math.floor(now / 3_600_000) * 3_600_000
+
+    upsertRewardHourly({
+      hourEpoch,
+      snapshotAt: now,
+      totalEarnedUsd: this.rewardTotal,
+      ratePerDay: this.rewardLastRate,
+    })
+
+    const posRows = Array.from(this.positions.values()).map((pos) => ({
+      hourEpoch,
+      snapshotAt: now,
+      conditionId: pos.conditionId,
+      question: pos.question,
+      rewardSharePct: pos.rewardSharePct,
+      expectedRatePerDay: pos.expectedRatePerDay,
+      earnedThisHourUsd: pos.earnedSinceLastSnapshot,
+    }))
+    if (posRows.length > 0) insertPositionRewardHourly(posRows)
+
+    // Reset per-position incremental counter after snapshot.
+    for (const pos of this.positions.values()) pos.earnedSinceLastSnapshot = 0
+
+    console.log(`[engine] hourly snapshot — total earned $${this.rewardTotal.toFixed(4)}, ${posRows.length} positions`)
+  }
+
   private accrueRewards(): void {
     if (this.state !== 'running') return
     // Recompute scores inline so the reward rate we persist is fresh.
     let totalRate = 0
     const now = Date.now()
+    const elapsedDays = (now - this.rewardLastUpdatedAt) / (24 * 60 * 60 * 1000)
+
     for (const pos of this.positions.values()) {
       const view = pos.latestBook
       if (!view || view.mid === null || !this.config) continue
@@ -597,10 +647,15 @@ export class BackendPaperEngine {
       pos.rewardSharePct = ((bidShare + askShare) / 2) * 100
       pos.expectedRatePerDay = (pos.dailyPool / 2) * bidShare + (pos.dailyPool / 2) * askShare
       totalRate += pos.expectedRatePerDay
+
+      // Accumulate per-position incremental earned (for hourly snapshot).
+      const posIncrement = pos.expectedRatePerDay * elapsedDays
+      pos.totalEarnedUsd = (pos.totalEarnedUsd ?? 0) + posIncrement
+      pos.earnedSinceLastSnapshot = (pos.earnedSinceLastSnapshot ?? 0) + posIncrement
+
       upsertPosition(this.toRow(pos, now))
     }
 
-    const elapsedDays = (now - this.rewardLastUpdatedAt) / (24 * 60 * 60 * 1000)
     this.rewardTotal += this.rewardLastRate * elapsedDays
     this.rewardLastRate = totalRate
     this.rewardLastUpdatedAt = now

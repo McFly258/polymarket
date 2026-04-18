@@ -97,6 +97,29 @@ function initSchema(db: Database.Database) {
       expected_rate_per_day REAL NOT NULL,
       updated_at INTEGER NOT NULL
     );
+
+    -- Hourly total-reward snapshots (one row per hour, keyed by hour_epoch).
+    CREATE TABLE IF NOT EXISTS paper_reward_hourly (
+      hour_epoch INTEGER PRIMARY KEY,
+      snapshot_at INTEGER NOT NULL,
+      total_earned_usd REAL NOT NULL,
+      rate_per_day REAL NOT NULL
+    );
+
+    -- Hourly per-position reward snapshots.
+    CREATE TABLE IF NOT EXISTS paper_position_reward_hourly (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      hour_epoch INTEGER NOT NULL,
+      snapshot_at INTEGER NOT NULL,
+      condition_id TEXT NOT NULL,
+      question TEXT NOT NULL,
+      reward_share_pct REAL NOT NULL,
+      expected_rate_per_day REAL NOT NULL,
+      earned_this_hour_usd REAL NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_pos_reward_hour ON paper_position_reward_hourly(hour_epoch DESC);
+    CREATE INDEX IF NOT EXISTS idx_pos_reward_cid ON paper_position_reward_hourly(condition_id, hour_epoch DESC);
   `)
 
   // Seed singleton rows on first run.
@@ -373,4 +396,87 @@ export function deletePosition(conditionId: string): void {
 
 export function clearAllPositions(): void {
   getDb().prepare(`DELETE FROM paper_positions`).run()
+}
+
+// ── Hourly reward snapshots ───────────────────────────────────────────
+
+export interface RewardHourlyRow {
+  hourEpoch: number
+  snapshotAt: number
+  totalEarnedUsd: number
+  ratePerDay: number
+}
+
+export interface PositionRewardHourlyRow {
+  hourEpoch: number
+  snapshotAt: number
+  conditionId: string
+  question: string
+  rewardSharePct: number
+  expectedRatePerDay: number
+  earnedThisHourUsd: number
+}
+
+export function upsertRewardHourly(r: RewardHourlyRow): void {
+  getDb()
+    .prepare(
+      `INSERT OR REPLACE INTO paper_reward_hourly
+       (hour_epoch, snapshot_at, total_earned_usd, rate_per_day)
+       VALUES (?, ?, ?, ?)`,
+    )
+    .run(r.hourEpoch, r.snapshotAt, r.totalEarnedUsd, r.ratePerDay)
+}
+
+export function insertPositionRewardHourly(rows: PositionRewardHourlyRow[]): void {
+  const db = getDb()
+  const stmt = db.prepare(
+    `INSERT INTO paper_position_reward_hourly
+     (hour_epoch, snapshot_at, condition_id, question, reward_share_pct, expected_rate_per_day, earned_this_hour_usd)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  )
+  const tx = db.transaction((rs: PositionRewardHourlyRow[]) => {
+    for (const r of rs) stmt.run(r.hourEpoch, r.snapshotAt, r.conditionId, r.question, r.rewardSharePct, r.expectedRatePerDay, r.earnedThisHourUsd)
+  })
+  tx(rows)
+}
+
+export function readRewardHourly(limit = 168): RewardHourlyRow[] {
+  const rows = getDb()
+    .prepare(
+      `SELECT hour_epoch, snapshot_at, total_earned_usd, rate_per_day
+       FROM paper_reward_hourly ORDER BY hour_epoch DESC LIMIT ?`,
+    )
+    .all(limit) as Array<{ hour_epoch: number; snapshot_at: number; total_earned_usd: number; rate_per_day: number }>
+  return rows.map((r) => ({
+    hourEpoch: r.hour_epoch,
+    snapshotAt: r.snapshot_at,
+    totalEarnedUsd: r.total_earned_usd,
+    ratePerDay: r.rate_per_day,
+  }))
+}
+
+export function readPositionRewardHourly(conditionId?: string, limit = 168): PositionRewardHourlyRow[] {
+  const db = getDb()
+  const rows = conditionId
+    ? (db
+        .prepare(
+          `SELECT hour_epoch, snapshot_at, condition_id, question, reward_share_pct, expected_rate_per_day, earned_this_hour_usd
+           FROM paper_position_reward_hourly WHERE condition_id = ? ORDER BY hour_epoch DESC LIMIT ?`,
+        )
+        .all(conditionId, limit) as Array<Record<string, unknown>>)
+    : (db
+        .prepare(
+          `SELECT hour_epoch, snapshot_at, condition_id, question, reward_share_pct, expected_rate_per_day, earned_this_hour_usd
+           FROM paper_position_reward_hourly ORDER BY hour_epoch DESC LIMIT ?`,
+        )
+        .all(limit) as Array<Record<string, unknown>>)
+  return rows.map((r) => ({
+    hourEpoch: r.hour_epoch as number,
+    snapshotAt: r.snapshot_at as number,
+    conditionId: r.condition_id as string,
+    question: r.question as string,
+    rewardSharePct: r.reward_share_pct as number,
+    expectedRatePerDay: r.expected_rate_per_day as number,
+    earnedThisHourUsd: r.earned_this_hour_usd as number,
+  }))
 }
