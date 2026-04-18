@@ -274,59 +274,87 @@ export function getBookHistoryByMarket(conditionId: string) {
 //
 // For each condition_id we compute volatility on the first outcome's token
 // (binary markets are mirror-images so YES and NO have the same σ).
-export function getMarketVolatility(windowHours = 24) {
+//
+// Performance: with ~1M book snapshots in a 24h window the previous "fetch
+// then group in JS" approach was loading hundreds of MB into Node and
+// dominating dev-server RAM. Volatility is only used by the simulator — and
+// the simulator only ever consumes the top-N markets by daily pool — so we
+// pre-restrict to those condition_ids in SQL and stream a tiny result set
+// back to JS. Each call is O(top-N · samples-per-market) instead of
+// O(total-snapshots).
+const VOLATILITY_TOP_N_DEFAULT = 400
+
+export interface MarketVolatilityRow {
+  conditionId: string
+  dailyStddevDollars: number
+  samples: number
+  hoursCovered: number
+}
+
+export function getMarketVolatility(
+  windowHours = 24,
+  topN = VOLATILITY_TOP_N_DEFAULT,
+): Record<string, MarketVolatilityRow> {
   const db = getDb()
   const cutoff = Date.now() - windowHours * 60 * 60 * 1000
-  const rows = db
+
+  // Pull just the top-N most-rewarded markets and the *first* token per
+  // condition. Binary markets are price-symmetric, so one token's σ stands in
+  // for the market.
+  const topMarkets = db
     .prepare(
-      `SELECT t.condition_id, b.token_id, b.ts, b.mid
-       FROM book_snapshots b
-       INNER JOIN tokens t ON t.token_id = b.token_id
-       WHERE b.ts >= ? AND b.mid IS NOT NULL
-       ORDER BY t.condition_id, b.token_id, b.ts`,
+      `SELECT t.condition_id, MIN(t.token_id) AS token_id
+       FROM tokens t
+       INNER JOIN (
+         SELECT condition_id, MAX(ts) AS max_ts
+         FROM reward_snapshots
+         GROUP BY condition_id
+       ) latest ON latest.condition_id = t.condition_id
+       INNER JOIN reward_snapshots r
+         ON r.condition_id = latest.condition_id AND r.ts = latest.max_ts
+       WHERE r.daily_rate > 0
+       GROUP BY t.condition_id
+       ORDER BY r.daily_rate DESC
+       LIMIT ?`,
     )
-    .all(cutoff) as Array<{ condition_id: string; token_id: string; ts: number; mid: number }>
+    .all(topN) as Array<{ condition_id: string; token_id: string }>
 
-  // Group by condition_id, pick first token per condition, compute stddev of mid diffs.
-  const byCondition = new Map<string, { tokenId: string; series: Array<{ ts: number; mid: number }> }>()
-  for (const r of rows) {
-    let entry = byCondition.get(r.condition_id)
-    if (!entry) {
-      entry = { tokenId: r.token_id, series: [] }
-      byCondition.set(r.condition_id, entry)
-    }
-    if (entry.tokenId !== r.token_id) continue
-    entry.series.push({ ts: r.ts, mid: r.mid })
-  }
+  if (topMarkets.length === 0) return {}
 
-  const out: Record<
-    string,
-    { conditionId: string; dailyStddevDollars: number; samples: number; hoursCovered: number }
-  > = {}
+  // Per-token mid series, fetched one prepared statement at a time. Each
+  // result is bounded to ~window/snapshot-cadence rows (≈300 for 24h@5min),
+  // so the in-memory footprint is at most topN×300 = ~120K small rows.
+  const seriesStmt = db.prepare(
+    `SELECT ts, mid FROM book_snapshots
+     WHERE token_id = ? AND ts >= ? AND mid IS NOT NULL
+     ORDER BY ts`,
+  )
 
-  for (const [conditionId, { series }] of byCondition) {
+  const out: Record<string, MarketVolatilityRow> = {}
+  for (const m of topMarkets) {
+    const series = seriesStmt.all(m.token_id, cutoff) as Array<{ ts: number; mid: number }>
     if (series.length < 3) continue
-    const diffs: number[] = []
+
+    let sum = 0
+    let sumSq = 0
     let intervalMs = 0
+    const n = series.length - 1
     for (let i = 1; i < series.length; i++) {
-      diffs.push(series[i].mid - series[i - 1].mid)
+      const d = series[i].mid - series[i - 1].mid
+      sum += d
+      sumSq += d * d
       intervalMs += series[i].ts - series[i - 1].ts
     }
-    if (diffs.length === 0) continue
-
-    const mean = diffs.reduce((s, d) => s + d, 0) / diffs.length
-    const variance =
-      diffs.reduce((s, d) => s + (d - mean) ** 2, 0) / Math.max(1, diffs.length - 1)
+    const mean = sum / n
+    const variance = Math.max(0, (sumSq - n * mean * mean) / Math.max(1, n - 1))
     const stepSigma = Math.sqrt(variance)
-
-    // Scale per-step σ to daily σ using √(bars per day).
-    const avgIntervalMs = intervalMs / diffs.length
+    const avgIntervalMs = intervalMs / n
     const barsPerDay = avgIntervalMs > 0 ? (24 * 60 * 60 * 1000) / avgIntervalMs : 1
     const dailyStddevDollars = stepSigma * Math.sqrt(barsPerDay)
-
     const hoursCovered = (series[series.length - 1].ts - series[0].ts) / (60 * 60 * 1000)
-    out[conditionId] = {
-      conditionId,
+
+    out[m.condition_id] = {
+      conditionId: m.condition_id,
       dailyStddevDollars,
       samples: series.length,
       hoursCovered,

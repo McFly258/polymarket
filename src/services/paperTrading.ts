@@ -123,6 +123,9 @@ interface InternalPosition extends PaperPosition {
   // Live numerator + denominator for proportional reward attribution.
   ourScore: number
   totalScore: number
+  // Latest book snapshot — updated on every WS message, consumed by the 1s
+  // reward tick so that score recomputation stays off the hot path.
+  latestBook: import('../api/polymarket').BookView | null
 }
 
 type Listener = () => void
@@ -187,14 +190,26 @@ export class PaperTradingEngine {
     return () => this.listeners.delete(fn)
   }
 
+  /** Fast, allocation-free state read used by the WS hot path. */
+  isRunning(): boolean {
+    return this.state === 'running'
+  }
+
+  // Cached snapshot — only rebuilt when notify() bumps the version. This keeps
+  // useSyncExternalStore's getSnapshot() referentially stable between notifies,
+  // which is what React requires to avoid an infinite re-render loop and what
+  // we want for performance (allocations were dominating the WS hot path).
+  private cachedSnapshot: EngineSnapshot | null = null
+
   snapshot(): EngineSnapshot {
-    return {
+    if (this.cachedSnapshot) return this.cachedSnapshot
+    this.cachedSnapshot = {
       state: this.state,
       startedAt: this.startedAt,
       brokerKind: this.broker.kind,
       config: this.config ?? ({} as StrategyConfig),
-      orders: [...this.orders],
-      fills: [...this.fills],
+      orders: this.orders.slice(),
+      fills: this.fills.slice(),
       reward: { ...this.reward },
       positions: [...this.positions.values()].map((p) => ({
         conditionId: p.conditionId,
@@ -208,6 +223,7 @@ export class PaperTradingEngine {
         expectedRatePerDay: p.expectedRatePerDay,
       })),
     }
+    return this.cachedSnapshot
   }
 
   async start(
@@ -279,6 +295,7 @@ export class PaperTradingEngine {
         expectedRatePerDay: 0,
         ourScore: 0,
         totalScore: 0,
+        latestBook: null,
       })
     }
 
@@ -310,8 +327,10 @@ export class PaperTradingEngine {
   }
 
   /**
-   * Feed a fresh book snapshot into the engine. Call this from the same
-   * onBook hook that updates the UI.
+   * Feed a fresh book snapshot into the engine. Called from the WS hot path —
+   * intentionally kept minimal: we only store the latest book and run fill
+   * detection (two comparisons). All heavy score computation is deferred to
+   * the 1s reward tick via recomputeScores().
    */
   evaluateBook(tokenId: string, view: BookView): void {
     if (this.state !== 'running') return
@@ -325,12 +344,33 @@ export class PaperTradingEngine {
     }
     if (!pos) return
 
+    // Store the latest book so the reward tick can use it without re-scanning.
+    pos.latestBook = view
     pos.midPrice = view.mid
     pos.bestBid = view.bestBid
     pos.bestAsk = view.bestAsk
 
-    // ── Reward share recompute ───────────────────────────────────────
-    if (view.mid !== null && this.config) {
+    // ── Fill detection (cheap — two comparisons) ─────────────────────
+    // A bid is "filled" when the book's best bid drops to or below our resting
+    // bid (someone took out the levels above us, the touch reached our level).
+    // An ask is filled when best ask rises to or above our resting ask.
+    if (pos.bidOrderId && view.bestBid !== null && view.bestBid <= pos.bidPrice) {
+      void this.handleFill(pos, 'bid', view)
+    }
+    if (pos.askOrderId && view.bestAsk !== null && view.bestAsk >= pos.askPrice) {
+      void this.handleFill(pos, 'ask', view)
+    }
+  }
+
+  /**
+   * Recompute reward share for all positions using their latest stored book.
+   * Called from a 1s setInterval — never from the WS hot path.
+   */
+  recomputeScores(): void {
+    if (this.state !== 'running') return
+    for (const pos of this.positions.values()) {
+      const view = pos.latestBook
+      if (!view || view.mid === null || !this.config) continue
       const mid = view.mid
       const ourBidScore = levelScore(mid - pos.bidPrice, pos.bidPrice * pos.bidSize, pos.maxSpreadDollars)
       const ourAskScore = levelScore(pos.askPrice - mid, pos.askPrice * pos.askSize, pos.maxSpreadDollars)
@@ -342,17 +382,6 @@ export class PaperTradingEngine {
       pos.totalScore = pos.ourScore + compBid + compAsk
       pos.rewardSharePct = ((bidShare + askShare) / 2) * 100
       pos.expectedRatePerDay = (pos.dailyPool / 2) * bidShare + (pos.dailyPool / 2) * askShare
-    }
-
-    // ── Fill detection ───────────────────────────────────────────────
-    // A bid is "filled" when the book's best bid drops to or below our resting
-    // bid (someone took out the levels above us, the touch reached our level).
-    // An ask is filled when best ask rises to or above our resting ask.
-    if (pos.bidOrderId && view.bestBid !== null && view.bestBid <= pos.bidPrice) {
-      void this.handleFill(pos, 'bid', view)
-    }
-    if (pos.askOrderId && view.bestAsk !== null && view.bestAsk >= pos.askPrice) {
-      void this.handleFill(pos, 'ask', view)
     }
   }
 
@@ -504,6 +533,7 @@ export class PaperTradingEngine {
   }
 
   private notify(): void {
+    this.cachedSnapshot = null
     for (const fn of this.listeners) fn()
   }
 

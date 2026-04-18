@@ -124,17 +124,51 @@ export interface MarketsAndBooks {
 }
 
 /**
- * One-shot HTTP load of markets + books. Used for the initial boot snapshot
- * and as a periodic safety resync in case the WS misses updates.
+ * Pick the top-N reward markets by daily pool. The long tail (~5K of ~5.8K
+ * markets) accounts for a tiny fraction of total reward USD and a tiny fraction
+ * of strategy interest, so we trim aggressively before any per-market work
+ * (book hydration, WS subscription, derive loop, simulation).
  */
-export async function loadMarketsAndBooks(): Promise<MarketsAndBooks> {
+export function topMarketsByDailyRate(markets: RawMarket[], topN: number): RawMarket[] {
+  if (markets.length <= topN) return markets
+  // Cheap partial sort: full sort is fine here (5.8K ints, runs once per resync).
+  return [...markets]
+    .sort((a, b) => dailyRateForMarket(b) - dailyRateForMarket(a))
+    .slice(0, topN)
+}
+
+export interface IncrementalLoadCallbacks {
+  onMarkets: (markets: RawMarket[]) => void
+  onBooksBatch: (books: Map<string, BookView>) => void
+}
+
+/**
+ * Streaming HTTP boot: returns markets first so the UI can render the table
+ * shell, then hydrates books in batches as they arrive. The caller updates its
+ * book map incrementally — no more "blank page until everything loads".
+ */
+export async function loadMarketsAndBooksStreaming(
+  cb: IncrementalLoadCallbacks,
+  topN = 400,
+): Promise<MarketsAndBooks> {
   const rawMarkets = await fetchRewardMarkets()
-  const markets = filterActiveRewardMarkets(rawMarkets)
+  const markets = topMarketsByDailyRate(filterActiveRewardMarkets(rawMarkets), topN)
+  cb.onMarkets(markets)
+
+  const books = await fetchBooks(collectTokenIds(markets), (batch) => cb.onBooksBatch(batch))
+  return { markets, books, updatedAt: new Date().toISOString() }
+}
+
+/**
+ * Back-compat one-shot loader (used by simpler callers / tests).
+ */
+export async function loadMarketsAndBooks(topN = 400): Promise<MarketsAndBooks> {
+  const rawMarkets = await fetchRewardMarkets()
+  const markets = topMarketsByDailyRate(filterActiveRewardMarkets(rawMarkets), topN)
   const books = await fetchBooks(collectTokenIds(markets))
   return { markets, books, updatedAt: new Date().toISOString() }
 }
 
-/** Back-compat for any caller still using the old single-call signature. */
 export async function loadDashboard(): Promise<DashboardData> {
   const { markets, books, updatedAt } = await loadMarketsAndBooks()
   return buildDashboard(markets, books, updatedAt)

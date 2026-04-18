@@ -1,66 +1,52 @@
-import type { BookLevel, BookView } from '../api/polymarket'
+// Node version of the Polymarket CLOB market WebSocket client.
+//
+// Mirrors src/services/wsClient.ts but uses the `ws` package instead of the
+// browser WebSocket. Sharded across multiple sockets when subscriptions exceed
+// MAX_IDS_PER_SOCKET; reconnects each shard independently with exp backoff.
 
-// Polymarket CLOB market websocket — public, no auth required.
-// A single connection subscribes to a set of assets_ids and receives book /
-// price_change / tick_size_change / last_trade_price events for each of them.
+import WebSocket from 'ws'
+
 const WS_URL = 'wss://ws-subscriptions-clob.polymarket.com/ws/market'
-
-// Polymarket occasionally disconnects large subscriptions; keep the slices
-// small enough that any single reconnect is cheap.
 const MAX_IDS_PER_SOCKET = 200
 
-// Cap on total assets we subscribe to via WS. Top 200 markets × 2 tokens = 400
-// token ids. The other markets still appear in the table (sourced from the
-// periodic HTTP resync) but don't get live WS tracking. This keeps the
-// number of sockets to 2 and the per-message work on the main thread minimal.
-const MAX_STREAMED_ASSETS = 400
+export interface BookLevel {
+  price: number
+  size: number
+}
 
-// Batch window: accumulate book updates for this many ms before flushing to the
-// paper-engine worker in one postMessage. Reduces cross-thread IPC overhead
-// significantly when many markets move simultaneously.
-const WORKER_BATCH_MS = 250
-
-export type ConnectionState = 'idle' | 'connecting' | 'open' | 'reconnecting' | 'closed'
+export interface BookView {
+  bestBid: number | null
+  bestAsk: number | null
+  mid: number | null
+  spread: number | null
+  bids: BookLevel[]
+  asks: BookLevel[]
+}
 
 interface RawBookMsg {
   event_type: 'book'
   asset_id: string
-  market: string
   bids: Array<{ price: string; size: string }>
   asks: Array<{ price: string; size: string }>
-  timestamp: string
-  hash: string
 }
 
 interface PriceChangeMsg {
   event_type: 'price_change'
   asset_id: string
-  market: string
   changes: Array<{ price: string; side: 'BUY' | 'SELL'; size: string }>
-  timestamp: string
-  hash: string
 }
 
 type IncomingMsg = RawBookMsg | PriceChangeMsg | { event_type: string; asset_id?: string }
 
-export interface WsClientOptions {
-  /** Called with the updated view whenever a book changes. */
-  onBook: (tokenId: string, view: BookView) => void
-  /** Notified any time the aggregate connection state changes. */
-  onStatus?: (state: ConnectionState, info: { streamed: number; totalRequested: number }) => void
-  /** Initial books we already have from HTTP — used as the seed state for diffs. */
-  seedBooks?: Map<string, BookView>
-}
+export type ConnectionState = 'idle' | 'connecting' | 'open' | 'reconnecting' | 'closed'
 
 function sortBids(levels: BookLevel[]): BookLevel[] {
   return [...levels].sort((a, b) => b.price - a.price)
 }
-
 function sortAsks(levels: BookLevel[]): BookLevel[] {
   return [...levels].sort((a, b) => a.price - b.price)
 }
-
-function recomputeMeta(bids: BookLevel[], asks: BookLevel[]): Pick<BookView, 'bestBid' | 'bestAsk' | 'mid' | 'spread'> {
+function recomputeMeta(bids: BookLevel[], asks: BookLevel[]) {
   const bestBid = bids[0]?.price ?? null
   const bestAsk = asks[0]?.price ?? null
   const mid = bestBid !== null && bestAsk !== null ? (bestBid + bestAsk) / 2 : null
@@ -94,22 +80,14 @@ function applyPriceChange(prev: BookView | undefined, changes: PriceChangeMsg['c
     const size = parseFloat(c.size)
     if (!Number.isFinite(price)) continue
     const map = c.side === 'BUY' ? bids : asks
-    if (!Number.isFinite(size) || size === 0) {
-      map.delete(price)
-    } else {
-      map.set(price, size)
-    }
+    if (!Number.isFinite(size) || size === 0) map.delete(price)
+    else map.set(price, size)
   }
   const bidArr = sortBids([...bids.entries()].map(([price, size]) => ({ price, size })))
   const askArr = sortAsks([...asks.entries()].map(([price, size]) => ({ price, size })))
   return { bids: bidArr, asks: askArr, ...recomputeMeta(bidArr, askArr) }
 }
 
-/**
- * One websocket per 200 assets; each socket reconnects independently with
- * exponential backoff. The shard aggregator exposes a single status derived
- * from the worst-performing socket.
- */
 interface ShardHandlers {
   onMsg: (msg: IncomingMsg) => void
   onState: (state: ConnectionState) => void
@@ -119,10 +97,10 @@ class Shard {
   private ws: WebSocket | null = null
   private closed = false
   private attempt = 0
-  private timer: number | null = null
+  private timer: NodeJS.Timeout | null = null
+  state: ConnectionState = 'idle'
   private readonly ids: string[]
   private readonly handlers: ShardHandlers
-  state: ConnectionState = 'idle'
 
   constructor(ids: string[], handlers: ShardHandlers) {
     this.ids = ids
@@ -134,13 +112,13 @@ class Shard {
     this.setState(this.attempt === 0 ? 'connecting' : 'reconnecting')
     const ws = new WebSocket(WS_URL)
     this.ws = ws
-    ws.addEventListener('open', () => {
+    ws.on('open', () => {
       this.attempt = 0
       this.setState('open')
       ws.send(JSON.stringify({ type: 'market', assets_ids: this.ids }))
     })
-    ws.addEventListener('message', (evt) => {
-      const raw = typeof evt.data === 'string' ? evt.data : ''
+    ws.on('message', (data) => {
+      const raw = data.toString()
       if (!raw || raw === 'PONG' || raw === 'pong') return
       try {
         const parsed = JSON.parse(raw)
@@ -150,16 +128,12 @@ class Shard {
           this.handlers.onMsg(parsed as IncomingMsg)
         }
       } catch {
-        // malformed frame — ignore, next snapshot will heal us
+        // malformed frame — ignore
       }
     })
-    ws.addEventListener('close', () => this.scheduleReconnect())
-    ws.addEventListener('error', () => {
-      try {
-        ws.close()
-      } catch {
-        /* noop */
-      }
+    ws.on('close', () => this.scheduleReconnect())
+    ws.on('error', () => {
+      try { ws.close() } catch { /* noop */ }
     })
   }
 
@@ -171,19 +145,15 @@ class Shard {
     this.setState('reconnecting')
     const backoff = Math.min(30_000, 500 * 2 ** Math.min(this.attempt, 6))
     this.attempt += 1
-    if (this.timer !== null) window.clearTimeout(this.timer)
-    this.timer = window.setTimeout(() => this.start(), backoff)
+    if (this.timer !== null) clearTimeout(this.timer)
+    this.timer = setTimeout(() => this.start(), backoff)
   }
 
   close(): void {
     this.closed = true
-    if (this.timer !== null) window.clearTimeout(this.timer)
+    if (this.timer !== null) clearTimeout(this.timer)
     if (this.ws) {
-      try {
-        this.ws.close()
-      } catch {
-        /* noop */
-      }
+      try { this.ws.close() } catch { /* noop */ }
     }
     this.setState('closed')
   }
@@ -195,27 +165,30 @@ class Shard {
   }
 }
 
+export interface WsClientOptions {
+  onBook: (tokenId: string, view: BookView) => void
+  onStatus?: (state: ConnectionState, info: { streamed: number }) => void
+}
+
 export interface WsClient {
   stop: () => void
   streamedCount: number
 }
 
-export function startMarketStream(
-  tokenIds: string[],
-  { onBook, onStatus, seedBooks }: WsClientOptions,
-): WsClient {
-  const streamIds = tokenIds.slice(0, MAX_STREAMED_ASSETS)
-  const books = new Map<string, BookView>()
-  if (seedBooks) {
-    for (const id of streamIds) {
-      const seed = seedBooks.get(id)
-      if (seed) books.set(id, seed)
-    }
-  }
+function aggregate(states: ConnectionState[]): ConnectionState {
+  if (states.length === 0) return 'idle'
+  if (states.some((s) => s === 'closed')) return 'closed'
+  if (states.some((s) => s === 'reconnecting')) return 'reconnecting'
+  if (states.some((s) => s === 'connecting')) return 'connecting'
+  if (states.every((s) => s === 'open')) return 'open'
+  return 'connecting'
+}
 
+export function startMarketStream(tokenIds: string[], opts: WsClientOptions): WsClient {
+  const books = new Map<string, BookView>()
   const shards: Shard[] = []
-  for (let i = 0; i < streamIds.length; i += MAX_IDS_PER_SOCKET) {
-    const slice = streamIds.slice(i, i + MAX_IDS_PER_SOCKET)
+  for (let i = 0; i < tokenIds.length; i += MAX_IDS_PER_SOCKET) {
+    const slice = tokenIds.slice(i, i + MAX_IDS_PER_SOCKET)
     const shard = new Shard(slice, {
       onMsg: (msg) => {
         if (!msg || !msg.event_type) return
@@ -223,37 +196,25 @@ export function startMarketStream(
           const bm = msg as RawBookMsg
           const view = viewFromRawBook(bm)
           books.set(bm.asset_id, view)
-          onBook(bm.asset_id, view)
+          opts.onBook(bm.asset_id, view)
         } else if (msg.event_type === 'price_change') {
           const pm = msg as PriceChangeMsg
           const view = applyPriceChange(books.get(pm.asset_id), pm.changes)
           books.set(pm.asset_id, view)
-          onBook(pm.asset_id, view)
+          opts.onBook(pm.asset_id, view)
         }
       },
       onState: () => {
-        if (!onStatus) return
+        if (!opts.onStatus) return
         const worst = aggregate(shards.map((s) => s.state))
-        onStatus(worst, { streamed: streamIds.length, totalRequested: tokenIds.length })
+        opts.onStatus(worst, { streamed: tokenIds.length })
       },
     })
     shards.push(shard)
   }
-
   for (const s of shards) s.start()
-
   return {
     stop: () => shards.forEach((s) => s.close()),
-    streamedCount: streamIds.length,
+    streamedCount: tokenIds.length,
   }
-}
-
-function aggregate(states: ConnectionState[]): ConnectionState {
-  if (states.length === 0) return 'idle'
-  // Worst wins: closed > reconnecting > connecting > idle > open
-  if (states.some((s) => s === 'closed')) return 'closed'
-  if (states.some((s) => s === 'reconnecting')) return 'reconnecting'
-  if (states.some((s) => s === 'connecting')) return 'connecting'
-  if (states.every((s) => s === 'open')) return 'open'
-  return 'connecting'
 }

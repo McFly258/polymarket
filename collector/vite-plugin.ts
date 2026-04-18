@@ -113,7 +113,8 @@ function handleRequest(req: IncomingMessage, res: ServerResponse, next: () => vo
     if (path === '/api/polymarket/stats') return json(res, getStats())
     if (path === '/api/polymarket/volatility') {
       const hours = Number(url.searchParams.get('hours') ?? '24') || 24
-      return json(res, { windowHours: hours, volatility: getMarketVolatility(hours) })
+      const topN = Number(url.searchParams.get('top') ?? '400') || 400
+      return json(res, { windowHours: hours, volatility: getMarketVolatility(hours, topN) })
     }
     next()
   } catch (err) {

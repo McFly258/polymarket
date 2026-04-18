@@ -1,14 +1,13 @@
 import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
 import type { BookView } from './api/polymarket'
-import { REFRESH_MS } from './constants'
 import type { DashboardData, MarketVolatility, RawMarket, StrategyConfig } from './types'
 import {
   buildDashboard,
   collectTokenIds,
-  loadMarketsAndBooks,
+  loadMarketsAndBooksStreaming,
 } from './services/dashboard'
-import { DEFAULT_STRATEGY } from './services/strategy'
+import { DEFAULT_STRATEGY, runSimulation } from './services/strategy'
 import { startMarketStream, type ConnectionState } from './services/wsClient'
 import { HeroPanel } from './components/HeroPanel'
 import { StatCards } from './components/StatCards'
@@ -19,14 +18,25 @@ import { SimulationPanel } from './components/SimulationPanel'
 import { PaperTradingPanel } from './components/PaperTradingPanel'
 import { getPaperEngine } from './services/paperTrading'
 
-// How often we re-derive the dashboard rows from the live books map. WS events
-// can arrive dozens of times per second — we throttle rather than render on
-// every tick to keep the table smooth.
+// Re-derive the dashboard rows from the live books map at most this often. WS
+// events can arrive dozens of times per second; the table can't visibly use
+// that bandwidth, so we coalesce. 1s matches the paper-engine reward tick.
 const DERIVE_INTERVAL_MS = 1000
 
 // Safety HTTP resync to catch anything the WS missed (tick-size changes, new
-// markets, etc.) and refresh the market metadata.
-const RESYNC_INTERVAL_MS = REFRESH_MS
+// markets, etc.). WS keeps books fresh — this is purely a metadata refresh, so
+// we can run it sparsely.
+const RESYNC_INTERVAL_MS = 15 * 60_000
+
+// Stable signature for a token-id list so the WS effect doesn't tear down
+// every time a single market enters/exits the active set.
+function tokenIdSignature(ids: string[]): string {
+  if (ids.length === 0) return ''
+  const sorted = [...ids].sort()
+  // Sample first/last/middle + length to detect material set changes without
+  // hashing every id on every tick.
+  return `${sorted.length}|${sorted[0]}|${sorted[Math.floor(sorted.length / 2)]}|${sorted[sorted.length - 1]}`
+}
 
 function App() {
   const [data, setData] = useState<DashboardData | null>(null)
@@ -77,13 +87,26 @@ function App() {
     try {
       setLoading(true)
       setError(null)
-      const snapshot = await loadMarketsAndBooks()
-      marketsRef.current = snapshot.markets
-      // Merge: HTTP snapshot wins for anything we haven't got a WS update for
-      // yet, but we keep any fresher WS state from the current session.
-      const merged = new Map(snapshot.books)
-      for (const [id, v] of booksRef.current) merged.set(id, v)
-      booksRef.current = merged
+      // Streaming load: markets arrive first so the table shell renders
+      // immediately, then books trickle in as HTTP batches complete.
+      await loadMarketsAndBooksStreaming(
+        {
+          onMarkets: (markets) => {
+            marketsRef.current = markets
+            dirtyRef.current = true
+            deriveNow()
+          },
+          onBooksBatch: (batch) => {
+            // Merge incoming batch — WS state takes priority for ids we already
+            // have a live feed for, so only write if WS hasn't provided fresher data.
+            for (const [id, view] of batch) {
+              if (!booksRef.current.has(id)) booksRef.current.set(id, view)
+            }
+            dirtyRef.current = true
+          },
+        },
+      )
+      // Final merge: keep any WS updates that arrived during the HTTP load.
       dirtyRef.current = true
       deriveNow()
       void fetchVolatility()
@@ -110,9 +133,21 @@ function App() {
     return () => window.clearInterval(id)
   }, [deriveNow])
 
-  // Wire up the websocket stream whenever the market set changes.
+  // Stable signature of the streamed token-id set. Recomputed only when `data`
+  // changes; the WS effect below depends on this string, so a refresh that adds
+  // or drops a single market won't tear down the sockets unless the *set*
+  // boundary actually shifts.
+  const tokenIdSig = useMemo(() => {
+    if (!data) return ''
+    return tokenIdSignature(collectTokenIds(marketsRef.current))
+  }, [data])
+
+  // Wire up the websocket stream whenever the streamed token set materially
+  // changes. The sockets persist across HTTP resyncs and across throttled
+  // re-derives — only set-shape changes (lots of markets added/removed) trigger
+  // a teardown.
   useEffect(() => {
-    if (!data) return
+    if (!tokenIdSig) return
     const tokenIds = collectTokenIds(marketsRef.current)
     if (tokenIds.length === 0) return
     const engine = getPaperEngine()
@@ -122,7 +157,7 @@ function App() {
         booksRef.current.set(tokenId, view)
         dirtyRef.current = true
         // Feed the paper engine first so fill detection happens at WS speed,
-        // independent of the 1s table re-derive throttle.
+        // independent of the table re-derive throttle.
         engine.evaluateBook(tokenId, view)
       },
       onStatus: (state, info) => {
@@ -131,11 +166,7 @@ function App() {
       },
     })
     return () => client.stop()
-    // We deliberately restart the stream only when the market COUNT changes —
-    // not on every data tick — to avoid thrashing the sockets. buildDashboard
-    // is pure, so same-length arrays behave identically.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [data?.rows.length])
+  }, [tokenIdSig])
 
   const deferredQuery = useDeferredValue(query)
   const deferredMinDaily = useDeferredValue(minDaily)
@@ -151,6 +182,16 @@ function App() {
       return hay.includes(q)
     })
   }, [data, deferredQuery, onlyEligible, deferredMinDaily])
+
+  // The simulation iterates every reward-eligible market — keep it in one place
+  // and pass the result to both panels. useDeferredValue lets the priority
+  // table paint first; the heavy sim work happens in a background render.
+  const deferredRows = useDeferredValue(data?.rows)
+  const deferredVolatility = useDeferredValue(volatility)
+  const sim = useMemo(
+    () => runSimulation(deferredRows ?? [], strategyConfig, deferredVolatility),
+    [deferredRows, strategyConfig, deferredVolatility],
+  )
 
   return (
     <main className="app-shell">
@@ -168,16 +209,15 @@ function App() {
       <StatCards data={data} />
 
       <SimulationPanel
-        rows={data?.rows ?? []}
         config={strategyConfig}
         onConfigChange={setStrategyConfig}
-        volatility={volatility}
+        result={sim}
       />
 
       <PaperTradingPanel
         rows={data?.rows ?? []}
         config={strategyConfig}
-        volatility={volatility}
+        sim={sim}
       />
 
       <FilterBar

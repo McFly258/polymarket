@@ -1,21 +1,58 @@
 import { useEffect, useMemo, useState, useSyncExternalStore } from 'react'
 import { formatPrice, formatUsd } from '../constants'
+import { getBackendEngine, type BackendEngineClient } from '../services/backendEngine'
 import { getPaperEngine, type EngineSnapshot } from '../services/paperTrading'
-import { runSimulation } from '../services/strategy'
-import type { MarketVolatility, RewardsRow, StrategyConfig } from '../types'
+import type { RewardsRow, SimulationResult, StrategyConfig } from '../types'
 
 interface Props {
   rows: RewardsRow[]
   config: StrategyConfig
-  volatility: Record<string, MarketVolatility>
+  sim: SimulationResult
 }
 
-function useEngineSnapshot(): EngineSnapshot {
-  const engine = getPaperEngine()
+type EngineSource = 'backend' | 'browser'
+
+interface EngineFacade {
+  subscribe: (fn: () => void) => () => void
+  snapshot: () => EngineSnapshot
+  start: () => Promise<void>
+  stop: () => Promise<void>
+  resetHistory: () => void | Promise<void>
+  errorMessage: () => string | null
+}
+
+function backendFacade(client: BackendEngineClient, config: StrategyConfig): EngineFacade {
+  return {
+    subscribe: (fn) => client.subscribe(fn),
+    snapshot: () => client.snapshot(),
+    start: () => client.start(config),
+    stop: () => client.stop(),
+    resetHistory: () => client.resetHistory(),
+    errorMessage: () => client.lastError(),
+  }
+}
+
+function browserFacade(
+  engine: ReturnType<typeof getPaperEngine>,
+  allocations: RewardsRow[],
+  sim: SimulationResult,
+  config: StrategyConfig,
+): EngineFacade {
+  return {
+    subscribe: (fn) => engine.subscribe(fn),
+    snapshot: () => engine.snapshot(),
+    start: () => engine.start(sim.allocations, allocations, config),
+    stop: () => engine.stop(),
+    resetHistory: () => engine.resetHistory(),
+    errorMessage: () => null,
+  }
+}
+
+function useFacadeSnapshot(facade: EngineFacade): EngineSnapshot {
   return useSyncExternalStore(
-    (cb) => engine.subscribe(cb),
-    () => engine.snapshot(),
-    () => engine.snapshot(),
+    (cb) => facade.subscribe(cb),
+    () => facade.snapshot(),
+    () => facade.snapshot(),
   )
 }
 
@@ -33,9 +70,20 @@ function durationSince(ts: number | null): string {
   return `${h}h ${m % 60}m`
 }
 
-export function PaperTradingPanel({ rows, config, volatility }: Props) {
-  const engine = getPaperEngine()
-  const snap = useEngineSnapshot()
+export function PaperTradingPanel({ rows, config, sim }: Props) {
+  const browserEngine = getPaperEngine()
+  const backendClient = getBackendEngine()
+  // Default to the backend engine — it's the one that keeps trading across
+  // tab closes, reloads, and EC2 process restarts. "Browser" is kept around
+  // as a quick local test mode.
+  const [source, setSource] = useState<EngineSource>('backend')
+  const facade = useMemo(
+    () => source === 'backend'
+      ? backendFacade(backendClient, config)
+      : browserFacade(browserEngine, rows, sim, config),
+    [source, backendClient, browserEngine, rows, sim, config],
+  )
+  const snap = useFacadeSnapshot(facade)
   const [busy, setBusy] = useState(false)
   // Re-render every second while running so the "uptime" + accrual stays live
   // even when no WS events arrive.
@@ -45,8 +93,6 @@ export function PaperTradingPanel({ rows, config, volatility }: Props) {
     const id = window.setInterval(() => setNow((n) => n + 1), 1000)
     return () => window.clearInterval(id)
   }, [snap.state])
-
-  const sim = useMemo(() => runSimulation(rows, config, volatility), [rows, config, volatility])
 
   const totalPnl = useMemo(
     () => snap.fills.reduce((s, f) => s + f.realisedPnlUsd, 0),

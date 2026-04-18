@@ -28,6 +28,10 @@ export const DEFAULT_STRATEGY: StrategyConfig = {
   // Hedge inventory on a fill by crossing the opposite side. Safer than carrying
   // a directional book on a binary market, and matches how pros run these.
   hedgeFillsOnBook: true,
+  // Risk criteria — see Notion "Polymarket Paper Trading — Risk Criteria to
+  // Maximize PnL" doc for the rationale and the Iran Gulf state reference case.
+  minPriceFloor: 0.05,
+  minHedgeDepthMultiple: 5,
 }
 
 // ── Reward scoring ──────────────────────────────────────────────────────────
@@ -164,6 +168,24 @@ function allocateMarket(
   const yesBook: BookSnapshot | undefined = row.books[0]
   if (!yesBook || yesBook.mid === null || yesBook.bestBid === null || yesBook.bestAsk === null) {
     return null
+  }
+
+  // Risk criterion #1 — min price floor. Pre-filter penny-tick books before we
+  // burn cycles on scoring/cost math.
+  const minFloor = config.minPriceFloor ?? DEFAULT_STRATEGY.minPriceFloor ?? 0
+  if (minFloor > 0 && yesBook.bestBid < minFloor) return null
+
+  // Risk criterion #2 — min hedge-side depth. The YES bid book is the hedge
+  // venue when our resting bid fills (we sell to flatten); the YES ask book is
+  // the hedge venue when our resting ask fills (we buy to flatten). Require
+  // each side's qualifying depth (USD inside the reward zone) to be ≥ multiple
+  // × our per-side notional.
+  const hedgeMult = config.minHedgeDepthMultiple ?? DEFAULT_STRATEGY.minHedgeDepthMultiple ?? 0
+  if (hedgeMult > 0) {
+    const perSideNotional = config.perMarketCapitalUsd / 2
+    const needed = hedgeMult * perSideNotional
+    if (yesBook.qualifyingBidDepthUsd < needed) return null
+    if (yesBook.qualifyingAskDepthUsd < needed) return null
   }
 
   const maxSpreadDollars = row.rewardMaxSpread / 100

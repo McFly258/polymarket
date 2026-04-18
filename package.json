@@ -8,7 +8,8 @@
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview",
-    "collect": "node --experimental-strip-types collector/collector.ts"
+    "collect": "node --experimental-strip-types collector/collector.ts",
+    "paper:serve": "node --experimental-strip-types --no-warnings=ExperimentalWarning sim/server.ts"
   },
   "dependencies": {
     "better-sqlite3": "^12.9.0",

@@ -152,6 +152,19 @@ export interface StrategyConfig {
    * position and carry the P&L to resolution — riskier, no hedge cost.
    */
   hedgeFillsOnBook: boolean
+  /**
+   * Risk criterion #1 — min price floor. Skip markets where YES bestBid is below
+   * this dollar floor. Penny-tick markets ($0.01) hedge at $0.001 = ~90% slippage,
+   * which obliterates reward accrual. Optional for back-compat with stored configs.
+   */
+  minPriceFloor?: number
+  /**
+   * Risk criterion #2 — min hedge-side depth multiple. Require qualifying USD
+   * depth on each side of the YES book to be ≥ this multiple of our per-side
+   * notional (perMarketCapitalUsd / 2). Thin hedge books cause large slippage
+   * on a fill. Optional for back-compat with stored configs.
+   */
+  minHedgeDepthMultiple?: number
 }
 
 /** Per-market daily volatility estimate (std-dev of mid moves, in dollars). */

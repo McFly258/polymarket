@@ -86,7 +86,10 @@ async function fetchBooksBatch(slice: string[]): Promise<[string, BookView][]> {
   return books.map((book) => [book.asset_id, parseBook(book)])
 }
 
-export async function fetchBooks(tokenIds: string[]): Promise<Map<string, BookView>> {
+export async function fetchBooks(
+  tokenIds: string[],
+  onBatch?: (batch: Map<string, BookView>) => void,
+): Promise<Map<string, BookView>> {
   const result = new Map<string, BookView>()
   if (tokenIds.length === 0) return result
 
@@ -95,15 +98,22 @@ export async function fetchBooks(tokenIds: string[]): Promise<Map<string, BookVi
     batches.push(tokenIds.slice(i, i + BOOK_BATCH))
   }
 
-  // Fetch in parallel with a concurrency cap to avoid overwhelming the CLOB
+  // Fetch in parallel with a concurrency cap to avoid overwhelming the CLOB.
+  // If a callback is supplied, push partial results as soon as a window
+  // completes — the UI uses this to render the table progressively.
   for (let i = 0; i < batches.length; i += BOOK_CONCURRENCY) {
     const window = batches.slice(i, i + BOOK_CONCURRENCY)
     const settled = await Promise.allSettled(window.map(fetchBooksBatch))
+    const partial = onBatch ? new Map<string, BookView>() : null
     for (const s of settled) {
       if (s.status === 'fulfilled') {
-        for (const [id, view] of s.value) result.set(id, view)
+        for (const [id, view] of s.value) {
+          result.set(id, view)
+          partial?.set(id, view)
+        }
       }
     }
+    if (partial && partial.size > 0) onBatch?.(partial)
   }
 
   return result

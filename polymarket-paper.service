@@ -1,0 +1,20 @@
+[Unit]
+Description=Polymarket paper-trading engine (backend sim)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/.openclaw/workspace/polymarket
+Environment=NODE_ENV=production
+Environment=PAPER_PORT=7801
+Environment=PAPER_HOST=127.0.0.1
+ExecStart=/usr/bin/node --experimental-strip-types --no-warnings=ExperimentalWarning sim/server.ts
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:/home/ubuntu/.openclaw/workspace/polymarket/paper-engine.log
+StandardError=append:/home/ubuntu/.openclaw/workspace/polymarket/paper-engine.log
+
+[Install]
+WantedBy=multi-user.target

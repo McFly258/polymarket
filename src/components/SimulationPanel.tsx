@@ -1,13 +1,12 @@
-import { memo, useMemo, useState } from 'react'
+import { memo, useState } from 'react'
 import { formatPrice, formatUsd } from '../constants'
-import { runSimulation, DEFAULT_STRATEGY } from '../services/strategy'
-import type { MarketVolatility, RewardsRow, StrategyAllocation, StrategyConfig } from '../types'
+import { DEFAULT_STRATEGY } from '../services/strategy'
+import type { SimulationResult, StrategyAllocation, StrategyConfig } from '../types'
 
 type Props = {
-  rows: RewardsRow[]
   config: StrategyConfig
   onConfigChange: (c: StrategyConfig) => void
-  volatility: Record<string, MarketVolatility>
+  result: SimulationResult
 }
 
 const ROWS_PER_PAGE = 100
@@ -81,8 +80,7 @@ const SimRow = memo(function SimRow({ a, i }: { a: StrategyAllocation; i: number
   )
 })
 
-export function SimulationPanel({ rows, config, onConfigChange, volatility }: Props) {
-  const result = useMemo(() => runSimulation(rows, config, volatility), [rows, config, volatility])
+export function SimulationPanel({ config, onConfigChange, result }: Props) {
   const [shown, setShown] = useState(ROWS_PER_PAGE)
 
   const maxMarkets = config.perMarketCapitalUsd > 0
