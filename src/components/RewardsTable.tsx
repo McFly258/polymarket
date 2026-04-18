@@ -63,7 +63,7 @@ const MarketRow = memo(function MarketRow({ row, selected, onSelect }: RowProps)
     >
       <td className="question-cell">
         <a
-          href={`https://polymarket.com/event/${row.slug}`}
+          href={`https://polymarket.com/market/${row.slug}`}
           target="_blank"
           rel="noreferrer"
         >

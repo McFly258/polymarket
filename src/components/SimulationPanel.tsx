@@ -52,7 +52,7 @@ const SimRow = memo(function SimRow({ a, i }: { a: StrategyAllocation; i: number
     <tr>
       <td className="dim">{i + 1}</td>
       <td className="question-cell">
-        <a href={`https://polymarket.com/event/${a.slug}`} target="_blank" rel="noreferrer">
+        <a href={`https://polymarket.com/market/${a.slug}`} target="_blank" rel="noreferrer">
           {a.question}
         </a>
       </td>
