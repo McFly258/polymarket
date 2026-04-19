@@ -85,6 +85,11 @@ const MIN_HEDGE_DEPTH_RATIO = 5
 const MIN_BOOK_LEVELS = 3
 const MIN_BOOK_DEPTH_SHARES = 100
 
+// C6: volatility gate — skip markets whose daily price std-dev exceeds this
+//     threshold. High-volatility markets resolve adversely faster than reward
+//     accrues; the Iran nuclear deal (~0.10/day stddev) is the canonical example.
+const MAX_DAILY_STDDEV = 0.04
+
 // C7: binary-extreme exclusion.
 //     Markets near certainty (mid > MAX_MID_PRICE) or near-zero (mid < MIN_MID_PRICE)
 //     carry asymmetric resolution risk that overwhelms reward accrual.
@@ -355,7 +360,8 @@ export class BackendPaperEngine {
       console.error('[engine] fetch failed during realloc, keeping existing positions:', err)
       return
     }
-    const sim = runSimulation(rows, this.config, loadVolatility())
+    const vol = loadVolatility()
+    const sim = runSimulation(rows, this.config, vol)
     const byCondition = new Map(sim.allocations.map((a) => [a.conditionId, a]))
     const rowsById = new Map(rows.map((r) => [r.conditionId, r]))
     console.log(`  allocations: ${sim.allocations.length} markets, deployed=$${sim.deployedCapital.toFixed(0)}, gross=$${sim.grossDailyUsd.toFixed(2)}/day`)
@@ -373,11 +379,11 @@ export class BackendPaperEngine {
       if (!row) continue
       const existing = this.positions.get(alloc.conditionId)
       if (!existing) {
-        await this.openPosition(alloc, row)
+        await this.openPosition(alloc, row, vol)
       } else if (Math.abs(existing.bidPrice - (alloc.bidPrice ?? existing.bidPrice)) >= 0.01 ||
                  Math.abs(existing.askPrice - (alloc.askPrice ?? existing.askPrice)) >= 0.01) {
         await this.closePosition(alloc.conditionId)
-        await this.openPosition(alloc, row)
+        await this.openPosition(alloc, row, vol)
       }
     }
 
@@ -391,7 +397,7 @@ export class BackendPaperEngine {
     })
   }
 
-  private async openPosition(alloc: StrategyAllocation, row: RewardsRow): Promise<void> {
+  private async openPosition(alloc: StrategyAllocation, row: RewardsRow, vol: Record<string, MarketVolatility>): Promise<void> {
     if (alloc.bidPrice === null || alloc.askPrice === null) return
     const yesBook = row.books[0]
     if (!yesBook) return
@@ -445,6 +451,13 @@ export class BackendPaperEngine {
     const totalAskShares = yesBook.asks.reduce((s, l) => s + l.size, 0)
     if (totalBidShares < MIN_BOOK_DEPTH_SHARES || totalAskShares < MIN_BOOK_DEPTH_SHARES) {
       console.log(`[engine] skip ${tag} — C5 total depth (bids=${totalBidShares.toFixed(0)} asks=${totalAskShares.toFixed(0)} min=${MIN_BOOK_DEPTH_SHARES})`)
+      return
+    }
+
+    // C6: volatility gate — skip if daily price stddev exceeds threshold.
+    const marketVol = vol[alloc.conditionId]
+    if (marketVol && marketVol.dailyStddevDollars > MAX_DAILY_STDDEV) {
+      console.log(`[engine] skip ${tag} — C6 volatility (stddev=${marketVol.dailyStddevDollars.toFixed(4)} > ${MAX_DAILY_STDDEV})`)
       return
     }
 
