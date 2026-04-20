@@ -1,9 +1,9 @@
-import { useEffect, useMemo, useState, useSyncExternalStore } from 'react'
+import { Fragment, useEffect, useMemo, useState, useSyncExternalStore } from 'react'
 import { formatPrice, formatUsd } from '../constants'
 import { getBackendEngine, type BackendEngineClient } from '../services/backendEngine'
-import { getPaperEngine, type EngineSnapshot, type PaperPosition } from '../services/paperTrading'
+import { getPaperEngine, type EngineSnapshot } from '../services/paperTrading'
 import type { RewardsRow, SimulationResult, StrategyConfig } from '../types'
-import { OrderBookModal } from './OrderBookModal'
+import { OrderBookPanel } from './OrderBookPanel'
 import { PnLChart } from './PnLChart'
 
 interface Props {
@@ -87,11 +87,15 @@ export function PaperTradingPanel({ rows, config, sim }: Props) {
   )
   const snap = useFacadeSnapshot(facade)
   const [busy, setBusy] = useState(false)
-  const [bookForId, setBookForId] = useState<string | null>(null)
-  const bookFor: PaperPosition | null = useMemo(
-    () => (bookForId ? snap.positions.find((p) => p.conditionId === bookForId) ?? null : null),
-    [bookForId, snap.positions],
-  )
+  const [expandedBookIds, setExpandedBookIds] = useState<Set<string>>(() => new Set())
+  function toggleBook(conditionId: string) {
+    setExpandedBookIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(conditionId)) next.delete(conditionId)
+      else next.add(conditionId)
+      return next
+    })
+  }
   // Re-render every second while running so the "uptime" + accrual stays live
   // even when no WS events arrive.
   const [, setNow] = useState(0)
@@ -256,51 +260,57 @@ export function PaperTradingPanel({ rows, config, sim }: Props) {
               snap.positions.map((p) => {
                 const bidOrder = snap.orders.find((o) => o.id === p.bidOrderId)
                 const askOrder = snap.orders.find((o) => o.id === p.askOrderId)
+                const expanded = expandedBookIds.has(p.conditionId)
                 return (
-                  <tr key={p.conditionId}>
-                    <td className="question-cell" title={p.question}>
-                      {p.question.length > 70 ? p.question.slice(0, 70) + '…' : p.question}
-                    </td>
-                    <td className="num dim">{p.midPrice !== null ? formatPrice(p.midPrice) : '—'}</td>
-                    <td className="num dim">
-                      {p.bestBid !== null ? formatPrice(p.bestBid) : '—'} /{' '}
-                      {p.bestAsk !== null ? formatPrice(p.bestAsk) : '—'}
-                    </td>
-                    <td className="num">
-                      {bidOrder ? `${formatPrice(bidOrder.price)} × ${bidOrder.size.toFixed(0)}` : <span className="dim">filled</span>}
-                    </td>
-                    <td className="num">
-                      {askOrder ? `${formatPrice(askOrder.price)} × ${askOrder.size.toFixed(0)}` : <span className="dim">filled</span>}
-                    </td>
-                    <td className="num dim">{formatUsd(snap.config.perMarketCapitalUsd ?? 0)}</td>
-                    <td className="num">{p.rewardSharePct.toFixed(1)}%</td>
-                    <td className="num kpi-green">{formatUsd(p.expectedRatePerDay)}</td>
-                    <td>
-                      <button
-                        type="button"
-                        className="refresh-button"
-                        style={{ padding: '0.25rem 0.6rem', fontSize: '0.78rem' }}
-                        onClick={() => setBookForId(p.conditionId)}
-                      >
-                        Book
-                      </button>
-                    </td>
-                  </tr>
+                  <Fragment key={p.conditionId}>
+                    <tr>
+                      <td className="question-cell" title={p.question}>
+                        {p.question.length > 70 ? p.question.slice(0, 70) + '…' : p.question}
+                      </td>
+                      <td className="num dim">{p.midPrice !== null ? formatPrice(p.midPrice) : '—'}</td>
+                      <td className="num dim">
+                        {p.bestBid !== null ? formatPrice(p.bestBid) : '—'} /{' '}
+                        {p.bestAsk !== null ? formatPrice(p.bestAsk) : '—'}
+                      </td>
+                      <td className="num">
+                        {bidOrder ? `${formatPrice(bidOrder.price)} × ${bidOrder.size.toFixed(0)}` : <span className="dim">filled</span>}
+                      </td>
+                      <td className="num">
+                        {askOrder ? `${formatPrice(askOrder.price)} × ${askOrder.size.toFixed(0)}` : <span className="dim">filled</span>}
+                      </td>
+                      <td className="num dim">{formatUsd(snap.config.perMarketCapitalUsd ?? 0)}</td>
+                      <td className="num">{p.rewardSharePct.toFixed(1)}%</td>
+                      <td className="num kpi-green">{formatUsd(p.expectedRatePerDay)}</td>
+                      <td>
+                        <button
+                          type="button"
+                          className="refresh-button"
+                          style={{ padding: '0.25rem 0.6rem', fontSize: '0.78rem' }}
+                          onClick={() => toggleBook(p.conditionId)}
+                          aria-expanded={expanded}
+                        >
+                          Book {expanded ? '▴' : '▾'}
+                        </button>
+                      </td>
+                    </tr>
+                    {expanded && (
+                      <tr>
+                        <td colSpan={9} style={{ background: 'rgba(15,23,42,0.35)', padding: 8 }}>
+                          <OrderBookPanel
+                            position={p}
+                            bidOrder={bidOrder ?? null}
+                            askOrder={askOrder ?? null}
+                          />
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
                 )
               })
             )}
           </tbody>
         </table>
       </div>
-
-      {bookFor && (
-        <OrderBookModal
-          position={bookFor}
-          bidOrder={snap.orders.find((o) => o.id === bookFor.bidOrderId) ?? null}
-          askOrder={snap.orders.find((o) => o.id === bookFor.askOrderId) ?? null}
-          onClose={() => setBookForId(null)}
-        />
-      )}
 
       <h3 className="panel-subhead">Recent fills + hedges</h3>
       <div className="table-wrap">
