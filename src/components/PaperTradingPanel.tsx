@@ -239,6 +239,7 @@ export function PaperTradingPanel({ rows, config, sim }: Props) {
               <th>Best bid / ask</th>
               <th>Bid resting</th>
               <th>Ask resting</th>
+              <th>Capital</th>
               <th>Reward share</th>
               <th>$/day</th>
               <th></th>
@@ -247,7 +248,7 @@ export function PaperTradingPanel({ rows, config, sim }: Props) {
           <tbody>
             {snap.positions.length === 0 ? (
               <tr>
-                <td colSpan={8} className="dim" style={{ textAlign: 'center', padding: 24 }}>
+                <td colSpan={9} className="dim" style={{ textAlign: 'center', padding: 24 }}>
                   Engine is idle. Click Start to post phantom quotes for the current allocation set.
                 </td>
               </tr>
@@ -271,6 +272,7 @@ export function PaperTradingPanel({ rows, config, sim }: Props) {
                     <td className="num">
                       {askOrder ? `${formatPrice(askOrder.price)} × ${askOrder.size.toFixed(0)}` : <span className="dim">filled</span>}
                     </td>
+                    <td className="num dim">{formatUsd(snap.config.perMarketCapitalUsd ?? 0)}</td>
                     <td className="num">{p.rewardSharePct.toFixed(1)}%</td>
                     <td className="num kpi-green">{formatUsd(p.expectedRatePerDay)}</td>
                     <td>
