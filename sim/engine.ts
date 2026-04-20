@@ -96,6 +96,12 @@ const MAX_DAILY_STDDEV = 0.04
 const MIN_MID_PRICE = 0.05
 const MAX_MID_PRICE = 0.95
 
+// C4: mid-drift cancel — if the live best bid/ask drifts within this many ticks
+//     of our posted price, cancel immediately rather than waiting for a fill or
+//     the next realloc cycle. Prevents adverse fills when markets move toward us.
+const DRIFT_CANCEL_TICKS = 1
+const TICK = 0.01
+
 function dailyRateFor(market: Market): number {
   const rates = market.rewards?.rates
   if (!rates?.length) return 0
@@ -567,6 +573,27 @@ export class BackendPaperEngine {
     pos.midPrice = view.mid
     pos.bestBid = view.bestBid
     pos.bestAsk = view.bestAsk
+
+    // C4: drift-cancel — market has moved within DRIFT_CANCEL_TICKS of our quote
+    //     but hasn't filled us yet. Cancel immediately; next realloc will repost.
+    const bidDrift = pos.bidOrderId && view.bestBid !== null &&
+                     view.bestBid > pos.bidPrice &&
+                     view.bestBid <= pos.bidPrice + DRIFT_CANCEL_TICKS * TICK
+    const askDrift = pos.askOrderId && view.bestAsk !== null &&
+                     view.bestAsk < pos.askPrice &&
+                     view.bestAsk >= pos.askPrice - DRIFT_CANCEL_TICKS * TICK
+    if (bidDrift || askDrift) {
+      const tag = pos.conditionId.slice(0, 8)
+      console.log(`[engine] C4 drift-cancel ${tag} — bestBid=${view.bestBid?.toFixed(3)} ourBid=${pos.bidPrice.toFixed(3)} bestAsk=${view.bestAsk?.toFixed(3)} ourAsk=${pos.askPrice.toFixed(3)}`)
+      this.positions.delete(pos.conditionId)
+      const toCancel = [pos.bidOrderId, pos.askOrderId].filter((x): x is string => !!x)
+      const now = Date.now()
+      void Promise.all(toCancel.map((id) => this.broker.cancelOrder(id))).then(() => {
+        for (const id of toCancel) updateOrderStatus(id, 'cancelled', now)
+        deletePosition(pos.conditionId)
+      })
+      return
+    }
 
     if (pos.bidOrderId && view.bestBid !== null && view.bestBid <= pos.bidPrice) {
       void this.handleFill(pos, 'bid', view)
