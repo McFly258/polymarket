@@ -102,6 +102,7 @@ export interface EngineSnapshot {
 export interface PaperPosition {
   conditionId: string
   question: string
+  tokenId: string
   bidOrderId: string | null
   askOrderId: string | null
   midPrice: number | null
@@ -214,6 +215,7 @@ export class PaperTradingEngine {
       positions: [...this.positions.values()].map((p) => ({
         conditionId: p.conditionId,
         question: p.question,
+        tokenId: p.tokenId,
         bidOrderId: p.bidOrderId,
         askOrderId: p.askOrderId,
         midPrice: p.midPrice,

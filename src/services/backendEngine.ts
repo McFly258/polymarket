@@ -58,7 +58,7 @@ function toFill(f: ServerFillRow): FillEvent {
 }
 function toPosition(p: ServerPositionRow): PaperPosition {
   return {
-    conditionId: p.conditionId, question: p.question,
+    conditionId: p.conditionId, question: p.question, tokenId: p.tokenId,
     bidOrderId: p.bidOrderId, askOrderId: p.askOrderId,
     midPrice: p.midPrice, bestBid: p.bestBid, bestAsk: p.bestAsk,
     rewardSharePct: p.rewardSharePct, expectedRatePerDay: p.expectedRatePerDay,

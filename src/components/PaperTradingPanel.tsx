@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState, useSyncExternalStore } from 'react'
 import { formatPrice, formatUsd } from '../constants'
 import { getBackendEngine, type BackendEngineClient } from '../services/backendEngine'
-import { getPaperEngine, type EngineSnapshot } from '../services/paperTrading'
+import { getPaperEngine, type EngineSnapshot, type PaperPosition } from '../services/paperTrading'
 import type { RewardsRow, SimulationResult, StrategyConfig } from '../types'
+import { OrderBookModal } from './OrderBookModal'
 import { PnLChart } from './PnLChart'
 
 interface Props {
@@ -86,6 +87,11 @@ export function PaperTradingPanel({ rows, config, sim }: Props) {
   )
   const snap = useFacadeSnapshot(facade)
   const [busy, setBusy] = useState(false)
+  const [bookForId, setBookForId] = useState<string | null>(null)
+  const bookFor: PaperPosition | null = useMemo(
+    () => (bookForId ? snap.positions.find((p) => p.conditionId === bookForId) ?? null : null),
+    [bookForId, snap.positions],
+  )
   // Re-render every second while running so the "uptime" + accrual stays live
   // even when no WS events arrive.
   const [, setNow] = useState(0)
@@ -235,12 +241,13 @@ export function PaperTradingPanel({ rows, config, sim }: Props) {
               <th>Ask resting</th>
               <th>Reward share</th>
               <th>$/day</th>
+              <th></th>
             </tr>
           </thead>
           <tbody>
             {snap.positions.length === 0 ? (
               <tr>
-                <td colSpan={7} className="dim" style={{ textAlign: 'center', padding: 24 }}>
+                <td colSpan={8} className="dim" style={{ textAlign: 'center', padding: 24 }}>
                   Engine is idle. Click Start to post phantom quotes for the current allocation set.
                 </td>
               </tr>
@@ -266,6 +273,16 @@ export function PaperTradingPanel({ rows, config, sim }: Props) {
                     </td>
                     <td className="num">{p.rewardSharePct.toFixed(1)}%</td>
                     <td className="num kpi-green">{formatUsd(p.expectedRatePerDay)}</td>
+                    <td>
+                      <button
+                        type="button"
+                        className="refresh-button"
+                        style={{ padding: '0.25rem 0.6rem', fontSize: '0.78rem' }}
+                        onClick={() => setBookForId(p.conditionId)}
+                      >
+                        Book
+                      </button>
+                    </td>
                   </tr>
                 )
               })
@@ -273,6 +290,15 @@ export function PaperTradingPanel({ rows, config, sim }: Props) {
           </tbody>
         </table>
       </div>
+
+      {bookFor && (
+        <OrderBookModal
+          position={bookFor}
+          bidOrder={snap.orders.find((o) => o.id === bookFor.bidOrderId) ?? null}
+          askOrder={snap.orders.find((o) => o.id === bookFor.askOrderId) ?? null}
+          onClose={() => setBookForId(null)}
+        />
+      )}
 
       <h3 className="panel-subhead">Recent fills + hedges</h3>
       <div className="table-wrap">
