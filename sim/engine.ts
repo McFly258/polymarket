@@ -584,7 +584,18 @@ export class BackendPaperEngine {
                      view.bestAsk >= pos.askPrice - DRIFT_CANCEL_TICKS * TICK
     if (bidDrift || askDrift) {
       const tag = pos.conditionId.slice(0, 8)
+      const side = bidDrift ? 'bid' : 'ask'
       console.log(`[engine] C4 drift-cancel ${tag} — bestBid=${view.bestBid?.toFixed(3)} ourBid=${pos.bidPrice.toFixed(3)} bestAsk=${view.bestAsk?.toFixed(3)} ourAsk=${pos.askPrice.toFixed(3)}`)
+      const tgToken = process.env.TELEGRAM_BOT_TOKEN
+      const tgChat = process.env.TELEGRAM_CHAT_ID
+      if (tgToken && tgChat) {
+        const msg = `⚡ C4 drift-cancel (${side})\n${pos.question}\nbid=${view.bestBid?.toFixed(3)} ourBid=${pos.bidPrice.toFixed(3)} ask=${view.bestAsk?.toFixed(3)} ourAsk=${pos.askPrice.toFixed(3)}`
+        void fetch(`https://api.telegram.org/bot${tgToken}/sendMessage`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ chat_id: tgChat, text: msg }),
+        }).catch(() => {})
+      }
       this.positions.delete(pos.conditionId)
       const toCancel = [pos.bidOrderId, pos.askOrderId].filter((x): x is string => !!x)
       const now = Date.now()
