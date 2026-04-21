@@ -182,6 +182,15 @@ export interface StrategyConfig {
    * where we carry full fill risk for near-zero reward share. Optional — defaults to 15%.
    */
   minExpectedRewardSharePct?: number
+  /**
+   * Daily drawdown circuit breaker. If the sum of realised fill PnL over the last
+   * `dailyLossWindowHours` drops below −`dailyLossLimitUsd`, the engine stops
+   * itself and fires a Telegram alert. Prevents a correlated bad day from
+   * compounding. Optional — defaults to $20 / 24h. Set to 0 to disable.
+   */
+  dailyLossLimitUsd?: number
+  /** Rolling window for the drawdown check, in hours. Defaults to 24. */
+  dailyLossWindowHours?: number
 }
 
 /** Per-market daily volatility estimate (std-dev of mid moves, in dollars). */

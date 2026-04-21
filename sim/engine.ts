@@ -254,6 +254,9 @@ export class BackendPaperEngine {
   // Adverse-selection detector state
   private fillHistory = new Map<string, Array<{ side: 'bid' | 'ask'; time: number }>>()
   private blacklist = new Map<string, number>() // conditionId → expiry timestamp (ms)
+  // Daily drawdown circuit breaker — rolling realised PnL per fill
+  private pnlHistory: Array<{ time: number; pnl: number }> = []
+  private breakerTripped = false
   private rewardTotal = 0
   private rewardLastRate = 0
   private rewardLastUpdatedAt = Date.now()
@@ -295,6 +298,8 @@ export class BackendPaperEngine {
     this.state = 'running'
     this.startedAt = opts.resumed && opts.prevStartedAt ? opts.prevStartedAt : Date.now()
     this.config = config
+    this.breakerTripped = false
+    this.pnlHistory = []
 
     writeEngineState({
       state: 'running',
@@ -761,6 +766,32 @@ export class BackendPaperEngine {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ chat_id: tgChat, text: msg }),
         }).catch(() => {})
+      }
+    }
+
+    // Daily drawdown circuit breaker. Track every fill's realised PnL in a
+    // rolling window; if cumulative loss exceeds the configured limit, stop
+    // the engine so a correlated bad day can't compound.
+    const lossLimit = cfg.dailyLossLimitUsd ?? 20
+    const lossWindowMs = (cfg.dailyLossWindowHours ?? 24) * 60 * 60_000
+    if (lossLimit > 0) {
+      this.pnlHistory.push({ time: now, pnl: realisedPnl })
+      this.pnlHistory = this.pnlHistory.filter((e) => e.time >= now - lossWindowMs)
+      const windowPnl = this.pnlHistory.reduce((s, e) => s + e.pnl, 0)
+      if (!this.breakerTripped && windowPnl <= -lossLimit) {
+        this.breakerTripped = true
+        console.log(`[engine] 🛑 daily drawdown breaker tripped — window PnL $${windowPnl.toFixed(2)} ≤ −$${lossLimit}, stopping engine`)
+        const tgToken = process.env.TELEGRAM_BOT_TOKEN
+        const tgChat = process.env.TELEGRAM_CHAT_ID
+        if (tgToken && tgChat) {
+          const msg = `🛑 Daily drawdown breaker\nRealised PnL $${windowPnl.toFixed(2)} in ${cfg.dailyLossWindowHours ?? 24}h ≤ −$${lossLimit}\nEngine stopped. Restart manually after review.`
+          void fetch(`https://api.telegram.org/bot${tgToken}/sendMessage`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ chat_id: tgChat, text: msg }),
+          }).catch(() => {})
+        }
+        void this.stop()
       }
     }
   }
