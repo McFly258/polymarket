@@ -102,6 +102,11 @@ const MAX_MID_PRICE = 0.95
 const DRIFT_CANCEL_TICKS = 1
 const TICK = 0.01
 
+// C4+: after a drift-cancel, wait this long before reposting on the same
+//      market so the book has a chance to stabilise. Shorter than the realloc
+//      cycle, long enough to avoid chasing a momentum move tick-by-tick.
+const REPOSITION_DELAY_MS = 10_000
+
 function dailyRateFor(market: Market): number {
   const rates = market.rewards?.rates
   if (!rates?.length) return 0
@@ -549,6 +554,39 @@ export class BackendPaperEngine {
     deletePosition(conditionId)
   }
 
+  /** C4 extension: after a drift-cancel, try to repost on just this market
+   *  rather than waiting for the next full realloc cycle. Called on a
+   *  REPOSITION_DELAY_MS timer so the book has time to stabilise. Silently
+   *  no-ops if the engine stopped, a realloc already repositioned, or the
+   *  market no longer passes the risk criteria. */
+  private async repositionMarket(conditionId: string): Promise<void> {
+    if (this.state !== 'running' || !this.config) return
+    if (this.positions.has(conditionId)) return
+
+    const tag = conditionId.slice(0, 8)
+    let rows: RewardsRow[]
+    try {
+      rows = await fetchRewardsRows()
+    } catch (err) {
+      console.error(`[engine] reposition ${tag} — fetch failed:`, err)
+      return
+    }
+
+    const vol = loadVolatility()
+    const sim = runSimulation(rows, this.config, vol)
+    const alloc = sim.allocations.find((a) => a.conditionId === conditionId)
+    const row = rows.find((r) => r.conditionId === conditionId)
+    if (!alloc || !row) {
+      console.log(`[engine] reposition ${tag} — dropped by allocator, skip`)
+      return
+    }
+
+    if (this.state !== 'running' || this.positions.has(conditionId)) return
+
+    console.log(`[engine] reposition ${tag} — post-drift repost (10s stabilised)`)
+    await this.openPosition(alloc, row, vol)
+  }
+
   private restartWs(): void {
     if (this.ws) { this.ws.stop(); this.ws = null }
     const tokenIds = [...this.positions.values()].map((p) => p.tokenId)
@@ -599,9 +637,11 @@ export class BackendPaperEngine {
       this.positions.delete(pos.conditionId)
       const toCancel = [pos.bidOrderId, pos.askOrderId].filter((x): x is string => !!x)
       const now = Date.now()
+      const cidToRepost = pos.conditionId
       void Promise.all(toCancel.map((id) => this.broker.cancelOrder(id))).then(() => {
         for (const id of toCancel) updateOrderStatus(id, 'cancelled', now)
-        deletePosition(pos.conditionId)
+        deletePosition(cidToRepost)
+        setTimeout(() => { void this.repositionMarket(cidToRepost) }, REPOSITION_DELAY_MS)
       })
       return
     }
