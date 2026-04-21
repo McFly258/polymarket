@@ -39,6 +39,12 @@ export const DEFAULT_STRATEGY: StrategyConfig = {
   marketLossLimitUsd: 5,
   marketLossWindowHours: 24,
   closePositionDaysToResolution: 2,
+  topUpWinnersEnabled: true,
+  topUpMultiplier: 2,
+  softFallbackEnabled: true,
+  softFallbackCapitalFraction: 0.5,
+  softFallbackMinSharePct: 1.5,
+  softFallbackMinYieldPct: 0.02,
 }
 
 // ── Reward scoring ──────────────────────────────────────────────────────────
@@ -313,6 +319,22 @@ function allocateMarket(
   }
 }
 
+function scoreAndFilter(
+  rows: RewardsRow[],
+  config: StrategyConfig,
+  volatility: Record<string, MarketVolatility>,
+  now: number,
+  minYieldPct: number,
+): StrategyAllocation[] {
+  return rows
+    .map((r) => allocateMarket(r, config, volatility[r.conditionId], now))
+    .filter((a): a is StrategyAllocation => a !== null)
+    .filter((a) => a.warnings.every((w) => !w.includes('outside reward zone')))
+    .filter((a) => a.expectedDailyUsd > 0)
+    .filter((a) => a.yieldPctDaily >= minYieldPct)
+    .sort((a, b) => b.yieldPctDaily - a.yieldPctDaily)
+}
+
 export function runSimulation(
   rows: RewardsRow[],
   config: StrategyConfig,
@@ -320,25 +342,76 @@ export function runSimulation(
 ): SimulationResult {
   const now = Date.now()
 
-  const candidates = rows
+  const pool = rows
     .filter((r) => r.dailyRate > 0)
     .filter((r) => {
       const days = daysUntil(r.endDateIso, now)
       return days === null || days >= config.minDaysToResolution
     })
-    .map((r) => allocateMarket(r, config, volatility[r.conditionId], now))
-    .filter((a): a is StrategyAllocation => a !== null)
-    .filter((a) => a.warnings.every((w) => !w.includes('outside reward zone')))
-    .filter((a) => a.expectedDailyUsd > 0)
-    .filter((a) => a.yieldPctDaily >= config.minYieldPct)
-    .sort((a, b) => b.yieldPctDaily - a.yieldPctDaily)
+
+  // ── Primary pass ──
+  const candidates = scoreAndFilter(pool, config, volatility, now, config.minYieldPct)
 
   const allocations: StrategyAllocation[] = []
   let remaining = config.totalCapitalUsd
+  const occupied = new Set<string>()
   for (const c of candidates) {
     if (remaining < c.capitalUsd) break
     allocations.push(c)
     remaining -= c.capitalUsd
+    occupied.add(c.conditionId)
+  }
+
+  // ── Top-up pass — re-score held markets at `topUpMultiplier` × per-market cap.
+  // Reusing allocateMarket re-runs the hedge-depth + competing-share + yield
+  // filters at the larger notional, so only markets that still clear every gate
+  // at the upsized capital get topped up. Iterates highest-yield first to
+  // prioritise our strongest edges.
+  const topUpEnabled = config.topUpWinnersEnabled ?? true
+  const topUpMultiplier = config.topUpMultiplier ?? 2
+  if (topUpEnabled && topUpMultiplier > 1) {
+    const topUpConfig: StrategyConfig = {
+      ...config,
+      perMarketCapitalUsd: config.perMarketCapitalUsd * topUpMultiplier,
+    }
+    const rowById = new Map(pool.map((r) => [r.conditionId, r]))
+    for (let i = 0; i < allocations.length; i++) {
+      const orig = allocations[i]
+      const row = rowById.get(orig.conditionId)
+      if (!row) continue
+      const upsized = allocateMarket(row, topUpConfig, volatility[row.conditionId], now)
+      if (!upsized) continue
+      if (!upsized.warnings.every((w) => !w.includes('outside reward zone'))) continue
+      if (upsized.expectedDailyUsd <= 0) continue
+      if (upsized.yieldPctDaily < config.minYieldPct) continue
+      const delta = upsized.capitalUsd - orig.capitalUsd
+      if (delta <= 0 || delta > remaining) continue
+      allocations[i] = upsized
+      remaining -= delta
+    }
+  }
+
+  // ── Soft fallback — fills any remaining budget with looser-threshold markets
+  // at a fraction of the per-market cap. Smaller per-market exposure keeps the
+  // worst-case loss bounded at ~`softFallbackCapitalFraction` × the primary cap,
+  // while still capturing rewards on markets that narrowly missed the main gate.
+  const softEnabled = config.softFallbackEnabled ?? true
+  if (softEnabled && remaining > 0) {
+    const fraction = config.softFallbackCapitalFraction ?? 0.5
+    const fallbackConfig: StrategyConfig = {
+      ...config,
+      perMarketCapitalUsd: Math.max(1, config.perMarketCapitalUsd * fraction),
+      minExpectedRewardSharePct: config.softFallbackMinSharePct ?? 1.5,
+    }
+    const fallbackMinYield = config.softFallbackMinYieldPct ?? 0.02
+    const remainingPool = pool.filter((r) => !occupied.has(r.conditionId))
+    const fallbackCandidates = scoreAndFilter(remainingPool, fallbackConfig, volatility, now, fallbackMinYield)
+    for (const c of fallbackCandidates) {
+      if (remaining < c.capitalUsd) break
+      allocations.push(c)
+      remaining -= c.capitalUsd
+      occupied.add(c.conditionId)
+    }
   }
 
   const deployedCapital = allocations.reduce((s, a) => s + a.capitalUsd, 0)
