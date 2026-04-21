@@ -175,6 +175,13 @@ export interface StrategyConfig {
   fillWindowMinutes?: number
   /** How long (minutes) to blacklist a market after triggering. Defaults to 60. */
   blacklistMinutes?: number
+  /**
+   * Risk criterion — min expected reward share. If our projected score divided by
+   * (our score + all competing score) is below this percentage on average across
+   * both sides, skip the market. Prevents entering markets dominated by large MMs
+   * where we carry full fill risk for near-zero reward share. Optional — defaults to 15%.
+   */
+  minExpectedRewardSharePct?: number
 }
 
 /** Per-market daily volatility estimate (std-dev of mid moves, in dollars). */

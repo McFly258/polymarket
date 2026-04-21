@@ -35,6 +35,7 @@ export const DEFAULT_STRATEGY: StrategyConfig = {
   maxFillsPerWindow: 3,
   fillWindowMinutes: 15,
   blacklistMinutes: 60,
+  minExpectedRewardSharePct: 15,
 }
 
 // ── Reward scoring ──────────────────────────────────────────────────────────
@@ -232,6 +233,16 @@ function allocateMarket(
   const competingScore = competingBid + competingAsk
   const bidSideShare = ourBidScore > 0 ? ourBidScore / (ourBidScore + competingBid) : 0
   const askSideShare = ourAskScore > 0 ? ourAskScore / (ourAskScore + competingAsk) : 0
+
+  // Risk criterion — competing score gate. Skip markets where our expected reward
+  // share (averaged across both sides) falls below the configured threshold.
+  // Entering such markets means absorbing fill risk for near-zero reward income.
+  const minSharePct = config.minExpectedRewardSharePct ?? DEFAULT_STRATEGY.minExpectedRewardSharePct ?? 0
+  if (minSharePct > 0) {
+    const avgSharePct = ((bidSideShare + askSideShare) / 2) * 100
+    if (avgSharePct < minSharePct) return null
+  }
+
   const grossDailyUsd = (row.dailyRate / 2) * bidSideShare + (row.dailyRate / 2) * askSideShare
 
   // ── Costs from volatility-driven reposting + fills ──
