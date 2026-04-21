@@ -95,6 +95,7 @@ function initSchema(db: Database.Database) {
       best_ask REAL,
       reward_share_pct REAL NOT NULL,
       expected_rate_per_day REAL NOT NULL,
+      capital_usd REAL NOT NULL DEFAULT 30,
       updated_at INTEGER NOT NULL
     );
 
@@ -121,6 +122,12 @@ function initSchema(db: Database.Database) {
     CREATE INDEX IF NOT EXISTS idx_pos_reward_hour ON paper_position_reward_hourly(hour_epoch DESC);
     CREATE INDEX IF NOT EXISTS idx_pos_reward_cid ON paper_position_reward_hourly(condition_id, hour_epoch DESC);
   `)
+
+  // Migrations — safe to re-run on every startup
+  const existingCols = (db.pragma('table_info(paper_positions)') as { name: string }[]).map((c) => c.name)
+  if (!existingCols.includes('capital_usd')) {
+    db.exec(`ALTER TABLE paper_positions ADD COLUMN capital_usd REAL NOT NULL DEFAULT 30`)
+  }
 
   // Seed singleton rows on first run.
   db.prepare(
@@ -379,6 +386,7 @@ export interface PositionRow {
   bestAsk: number | null
   rewardSharePct: number
   expectedRatePerDay: number
+  capitalUsd: number
   updatedAt: number
 }
 
@@ -388,13 +396,15 @@ export function upsertPosition(p: PositionRow): void {
       `INSERT OR REPLACE INTO paper_positions
        (condition_id, question, token_id, outcome, bid_order_id, ask_order_id,
         bid_price, ask_price, bid_size, ask_size, max_spread_dollars, daily_pool,
-        mid_price, best_bid, best_ask, reward_share_pct, expected_rate_per_day, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        mid_price, best_bid, best_ask, reward_share_pct, expected_rate_per_day,
+        capital_usd, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       p.conditionId, p.question, p.tokenId, p.outcome, p.bidOrderId, p.askOrderId,
       p.bidPrice, p.askPrice, p.bidSize, p.askSize, p.maxSpreadDollars, p.dailyPool,
-      p.midPrice, p.bestBid, p.bestAsk, p.rewardSharePct, p.expectedRatePerDay, p.updatedAt,
+      p.midPrice, p.bestBid, p.bestAsk, p.rewardSharePct, p.expectedRatePerDay,
+      p.capitalUsd, p.updatedAt,
     )
 }
 
@@ -403,7 +413,8 @@ export function readPositions(): PositionRow[] {
     .prepare(
       `SELECT condition_id, question, token_id, outcome, bid_order_id, ask_order_id,
               bid_price, ask_price, bid_size, ask_size, max_spread_dollars, daily_pool,
-              mid_price, best_bid, best_ask, reward_share_pct, expected_rate_per_day, updated_at
+              mid_price, best_bid, best_ask, reward_share_pct, expected_rate_per_day,
+              capital_usd, updated_at
        FROM paper_positions`,
     )
     .all() as Array<{
@@ -412,7 +423,8 @@ export function readPositions(): PositionRow[] {
       bid_price: number; ask_price: number; bid_size: number; ask_size: number;
       max_spread_dollars: number; daily_pool: number;
       mid_price: number | null; best_bid: number | null; best_ask: number | null;
-      reward_share_pct: number; expected_rate_per_day: number; updated_at: number
+      reward_share_pct: number; expected_rate_per_day: number;
+      capital_usd: number; updated_at: number
     }>
   return rows.map((r) => ({
     conditionId: r.condition_id, question: r.question, tokenId: r.token_id, outcome: r.outcome,
@@ -421,6 +433,7 @@ export function readPositions(): PositionRow[] {
     maxSpreadDollars: r.max_spread_dollars, dailyPool: r.daily_pool,
     midPrice: r.mid_price, bestBid: r.best_bid, bestAsk: r.best_ask,
     rewardSharePct: r.reward_share_pct, expectedRatePerDay: r.expected_rate_per_day,
+    capitalUsd: r.capital_usd,
     updatedAt: r.updated_at,
   }))
 }
