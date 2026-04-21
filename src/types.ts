@@ -192,6 +192,13 @@ export interface StrategyConfig {
   marketLossLimitUsd?: number
   /** Rolling window for the per-market drawdown check, in hours. Defaults to 24. */
   marketLossWindowHours?: number
+  /**
+   * Resolution wind-down. Unconditionally close held positions when their
+   * market has fewer than this many days to resolution. Entry is still gated by
+   * `minDaysToResolution`; this protects positions whose market drifted into
+   * the danger window since being opened. Defaults to 2. Set to 0 to disable.
+   */
+  closePositionDaysToResolution?: number
 }
 
 /** Per-market daily volatility estimate (std-dev of mid moves, in dollars). */

@@ -169,6 +169,14 @@ export function SimulationPanel({ config, onConfigChange, result }: Props) {
           width={70}
         />
         <NumberField
+          label="Close TTR"
+          value={config.closePositionDaysToResolution ?? 2}
+          onChange={(v) => onConfigChange({ ...config, closePositionDaysToResolution: Math.max(0, v) })}
+          step={1}
+          suffix="days"
+          width={70}
+        />
+        <NumberField
           label="Maker fee"
           value={config.makerFeePct * 100}
           onChange={(v) => onConfigChange({ ...config, makerFeePct: Math.max(0, v / 100) })}

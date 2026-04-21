@@ -38,6 +38,7 @@ export const DEFAULT_STRATEGY: StrategyConfig = {
   minExpectedRewardSharePct: 3,
   marketLossLimitUsd: 5,
   marketLossWindowHours: 24,
+  closePositionDaysToResolution: 2,
 }
 
 // ── Reward scoring ──────────────────────────────────────────────────────────
@@ -68,7 +69,7 @@ function competingScoreForSide(
   return total
 }
 
-function daysUntil(iso: string | null, now: number): number | null {
+export function daysUntil(iso: string | null, now: number): number | null {
   if (!iso) return null
   const t = new Date(iso).getTime()
   if (!Number.isFinite(t)) return null

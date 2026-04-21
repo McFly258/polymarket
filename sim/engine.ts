@@ -25,7 +25,7 @@
 import { fetchBooks, fetchRewardMarkets, computeBookMetrics, type Market } from '../collector/api.ts'
 import { USDC_POLYGON } from '../collector/config.ts'
 import { PaperBroker, type Broker, type PlaceOrderRequest } from '../src/services/broker.ts'
-import { runSimulation } from '../src/services/strategy.ts'
+import { runSimulation, daysUntil } from '../src/services/strategy.ts'
 import type {
   BookSnapshot,
   MarketVolatility,
@@ -384,6 +384,38 @@ export class BackendPaperEngine {
     const byCondition = new Map(sim.allocations.map((a) => [a.conditionId, a]))
     const rowsById = new Map(rows.map((r) => [r.conditionId, r]))
     console.log(`  allocations: ${sim.allocations.length} markets, deployed=$${sim.deployedCapital.toFixed(0)}, gross=$${sim.grossDailyUsd.toFixed(2)}/day`)
+
+    // 0. Resolution wind-down. Close any held position whose market has drifted
+    //    into the danger window (< closePositionDaysToResolution). Adverse
+    //    selection spikes near resolution as counterparties with resolution info
+    //    pick off our quotes; entry is gated by minDaysToResolution but once in,
+    //    the market's TTR decays — this sweep protects us on the way out.
+    const closeDays = this.config.closePositionDaysToResolution ?? 2
+    if (closeDays > 0) {
+      const nowMs = Date.now()
+      const blacklistMs = (this.config.blacklistMinutes ?? 60) * 60_000
+      for (const conditionId of [...this.positions.keys()]) {
+        const row = rowsById.get(conditionId)
+        if (!row) continue
+        const days = daysUntil(row.endDateIso, nowMs)
+        if (days !== null && days < closeDays) {
+          const pos = this.positions.get(conditionId)
+          console.log(`[engine] wind-down on ${conditionId.slice(0, 8)} — ${days.toFixed(2)}d to resolution < ${closeDays}d, closing + blacklisting ${this.config.blacklistMinutes ?? 60}m`)
+          this.blacklist.set(conditionId, nowMs + blacklistMs)
+          await this.closePosition(conditionId)
+          const tgToken = process.env.TELEGRAM_BOT_TOKEN
+          const tgChat = process.env.TELEGRAM_CHAT_ID
+          if (tgToken && tgChat && pos) {
+            const msg = `⏳ Wind-down: ${days.toFixed(2)}d to resolution < ${closeDays}d\n${pos.question}\nPosition closed. Blacklisted ${this.config.blacklistMinutes ?? 60}m.`
+            void fetch(`https://api.telegram.org/bot${tgToken}/sendMessage`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ chat_id: tgChat, text: msg }),
+            }).catch(() => {})
+          }
+        }
+      }
+    }
 
     // 1. Close positions no longer in the allocation set.
     for (const conditionId of [...this.positions.keys()]) {
