@@ -199,6 +199,27 @@ export interface StrategyConfig {
    * the danger window since being opened. Defaults to 2. Set to 0 to disable.
    */
   closePositionDaysToResolution?: number
+  /**
+   * Top up winners with idle capital. After the primary pass, iterate allocated
+   * markets (highest yield first) and re-allocate at `topUpMultiplier` × per-market
+   * cap if it still passes all risk filters and the extra capital fits in the
+   * remaining budget. Defaults to true.
+   */
+  topUpWinnersEnabled?: boolean
+  /** Size multiplier for top-up pass (e.g. 2 = double the per-market cap). Defaults to 2. */
+  topUpMultiplier?: number
+  /**
+   * Soft fallback tier. If capital remains after primary + top-up, allocate
+   * additional markets at a looser share/yield threshold but at a fraction of
+   * the per-market cap. Defaults to true.
+   */
+  softFallbackEnabled?: boolean
+  /** Capital fraction for soft-fallback allocations (e.g. 0.5 = half size). Defaults to 0.5. */
+  softFallbackCapitalFraction?: number
+  /** Reward-share threshold for the soft-fallback tier. Defaults to 1.5. */
+  softFallbackMinSharePct?: number
+  /** Minimum daily yield % for the soft-fallback tier. Defaults to 0.02. */
+  softFallbackMinYieldPct?: number
 }
 
 /** Per-market daily volatility estimate (std-dev of mid moves, in dollars). */
