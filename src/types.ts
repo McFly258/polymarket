@@ -220,6 +220,13 @@ export interface StrategyConfig {
   softFallbackMinSharePct?: number
   /** Minimum daily yield % for the soft-fallback tier. Defaults to 0.02. */
   softFallbackMinYieldPct?: number
+  /**
+   * Asymmetric per-side sizing. When enabled, per-market capital is split between
+   * bid and ask in proportion to their expected reward share (not 50/50). The
+   * dominant side gets more capital, capturing more rewards without increasing the
+   * total notional. Split is clamped to [30%, 70%]. Defaults to true.
+   */
+  asymmetricSizingEnabled?: boolean
 }
 
 /** Per-market daily volatility estimate (std-dev of mid moves, in dollars). */
@@ -265,6 +272,14 @@ export interface StrategyAllocation {
   expectedDailyUsd: number
   /** Capital deployed ($) for this allocation. */
   capitalUsd: number
+  /** Capital allocated to the bid side (asymmetric sizing or capitalUsd/2). */
+  bidCapitalUsd: number
+  /** Capital allocated to the ask side (asymmetric sizing or capitalUsd/2). */
+  askCapitalUsd: number
+  /** Our expected reward share on the bid side (0–1). */
+  bidSideShare: number
+  /** Our expected reward share on the ask side (0–1). */
+  askSideShare: number
   /** Net yield per day as a percentage of capitalUsd. */
   yieldPctDaily: number
   /** Daily mid volatility (USD, 1 sigma) used in the fill/reprice model. */

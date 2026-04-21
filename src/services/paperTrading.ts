@@ -110,6 +110,7 @@ export interface PaperPosition {
   bestAsk: number | null
   rewardSharePct: number
   expectedRatePerDay: number
+  capitalUsd: number
 }
 
 interface InternalPosition extends PaperPosition {
@@ -249,7 +250,7 @@ export class PaperTradingEngine {
       const yesBook = row.books[0]
       if (!yesBook) continue
 
-      const halfCapital = config.perMarketCapitalUsd / 2
+      const halfCapital = a.capitalUsd / 2
       const bidSize = Math.max(row.rewardMinSize, halfCapital / Math.max(a.bidPrice, 0.01))
       const askSize = Math.max(row.rewardMinSize, halfCapital / Math.max(a.askPrice, 0.01))
 
@@ -295,6 +296,7 @@ export class PaperTradingEngine {
         bestAsk: yesBook.bestAsk,
         rewardSharePct: 0,
         expectedRatePerDay: 0,
+        capitalUsd: a.capitalUsd,
         ourScore: 0,
         totalScore: 0,
         latestBook: null,

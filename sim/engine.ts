@@ -237,6 +237,7 @@ interface InternalPosition {
   bestAsk: number | null
   rewardSharePct: number
   expectedRatePerDay: number
+  capitalUsd: number
   totalEarnedUsd: number
   earnedSinceLastSnapshot: number
   ourScore: number
@@ -432,7 +433,8 @@ export class BackendPaperEngine {
       if (!existing) {
         await this.openPosition(alloc, row, vol)
       } else if (Math.abs(existing.bidPrice - (alloc.bidPrice ?? existing.bidPrice)) >= 0.01 ||
-                 Math.abs(existing.askPrice - (alloc.askPrice ?? existing.askPrice)) >= 0.01) {
+                 Math.abs(existing.askPrice - (alloc.askPrice ?? existing.askPrice)) >= 0.01 ||
+                 Math.abs(existing.capitalUsd - alloc.capitalUsd) >= 1) {
         await this.closePosition(alloc.conditionId)
         await this.openPosition(alloc, row, vol)
       }
@@ -474,9 +476,11 @@ export class BackendPaperEngine {
       return
     }
 
-    const halfCapital = config.perMarketCapitalUsd / 2
-    const bidSize = Math.max(row.rewardMinSize, halfCapital / Math.max(alloc.bidPrice, 0.01))
-    const askSize = Math.max(row.rewardMinSize, halfCapital / Math.max(alloc.askPrice, 0.01))
+    // Use per-side capital from allocation (asymmetric sizing when enabled, else half each).
+    const bidCapital = alloc.bidCapitalUsd ?? alloc.capitalUsd / 2
+    const askCapital = alloc.askCapitalUsd ?? alloc.capitalUsd / 2
+    const bidSize = Math.max(row.rewardMinSize, bidCapital / Math.max(alloc.bidPrice, 0.01))
+    const askSize = Math.max(row.rewardMinSize, askCapital / Math.max(alloc.askPrice, 0.01))
 
     // C2a: simulated hedge slippage at post time.
     //   bid fills → hedge by selling at bestBid. Loss = bidPrice − bestBid.
@@ -583,6 +587,7 @@ export class BackendPaperEngine {
       bestAsk: yesBook.bestAsk,
       rewardSharePct: 0,
       expectedRatePerDay: 0,
+      capitalUsd: alloc.capitalUsd,
       totalEarnedUsd: 0,
       earnedSinceLastSnapshot: 0,
       ourScore: 0,
@@ -972,6 +977,7 @@ export class BackendPaperEngine {
       bestAsk: pos.bestAsk,
       rewardSharePct: pos.rewardSharePct,
       expectedRatePerDay: pos.expectedRatePerDay,
+      capitalUsd: pos.capitalUsd,
       updatedAt: now,
     }
   }

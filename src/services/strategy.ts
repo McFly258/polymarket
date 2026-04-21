@@ -45,6 +45,7 @@ export const DEFAULT_STRATEGY: StrategyConfig = {
   softFallbackCapitalFraction: 0.5,
   softFallbackMinSharePct: 1.5,
   softFallbackMinYieldPct: 0.02,
+  asymmetricSizingEnabled: true,
 }
 
 // ── Reward scoring ──────────────────────────────────────────────────────────
@@ -217,7 +218,9 @@ function allocateMarket(
   const bidPrice = Math.max(tick, roundToTick(bidPriceRaw, tick, 'down'))
   const askPrice = Math.min(1 - tick, roundToTick(askPriceRaw, tick, 'up'))
 
-  const halfCapital = config.perMarketCapitalUsd / 2
+  const totalCapital = config.perMarketCapitalUsd
+  const halfCapital = totalCapital / 2
+  // Asymmetric sizing is computed after share scores — placeholder shares for score calculation
   const bidShares = halfCapital / Math.max(bidPrice, 0.01)
   const askShares = halfCapital / Math.max(askPrice, 0.01)
   const minSize = row.rewardMinSize
@@ -255,13 +258,31 @@ function allocateMarket(
     return null
   }
 
-  const grossDailyUsd = (row.dailyRate / 2) * bidSideShare + (row.dailyRate / 2) * askSideShare
+  // Asymmetric per-side sizing: split total capital proportionally to share, clamped [30%, 70%].
+  // When one side dominates (e.g. bid 80% share, ask 5%), put more capital on the dominant side
+  // to earn more rewards. Total notional stays the same — zero risk delta.
+  const asymEnabled = config.asymmetricSizingEnabled !== false // default true
+  let bidCapitalUsd = halfCapital
+  let askCapitalUsd = halfCapital
+  if (asymEnabled && bidSideShare + askSideShare > 0) {
+    const rawBidFrac = bidSideShare / (bidSideShare + askSideShare)
+    const bidFrac = Math.min(0.7, Math.max(0.3, rawBidFrac))
+    bidCapitalUsd = totalCapital * bidFrac
+    askCapitalUsd = totalCapital * (1 - bidFrac)
+  }
+
+  const grossDailyUsd = row.dailyRate * bidSideShare * (bidCapitalUsd / totalCapital) +
+    row.dailyRate * askSideShare * (askCapitalUsd / totalCapital)
 
   // ── Costs from volatility-driven reposting + fills ──
   const dailyVol = volatility?.dailyStddevDollars ?? 0
 
+  // Use asymmetric share counts for cost modelling so fill-cost scales with actual deployment.
+  const bidSharesAsym = bidCapitalUsd / Math.max(bidPrice, 0.01)
+  const askSharesAsym = askCapitalUsd / Math.max(askPrice, 0.01)
+
   const bidCost = sideFillCost({
-    shares: bidShares,
+    shares: bidSharesAsym,
     price: bidPrice,
     distanceFromMid: bidDistance,
     dailyVol,
@@ -269,7 +290,7 @@ function allocateMarket(
     bookSpread,
   })
   const askCost = sideFillCost({
-    shares: askShares,
+    shares: askSharesAsym,
     price: askPrice,
     distanceFromMid: askDistance,
     dailyVol,
@@ -284,7 +305,7 @@ function allocateMarket(
   const expectedRepriceCostUsd = repricesPerDay * 4 * config.gasCostPerOrderUsd
 
   const netDailyUsd = grossDailyUsd - expectedFillCostUsd - expectedRepriceCostUsd
-  const capitalUsd = config.perMarketCapitalUsd
+  const capitalUsd = totalCapital
   const yieldPctDaily = capitalUsd > 0 ? (netDailyUsd / capitalUsd) * 100 : 0
 
   if (dailyVol === 0) warnings.push('no volatility history — costs assumed 0')
@@ -309,6 +330,10 @@ function allocateMarket(
     grossDailyUsd,
     expectedDailyUsd: netDailyUsd,
     capitalUsd,
+    bidCapitalUsd,
+    askCapitalUsd,
+    bidSideShare,
+    askSideShare,
     yieldPctDaily,
     dailyVolUsd: dailyVol,
     expectedRepricesPerDay: repricesPerDay,
