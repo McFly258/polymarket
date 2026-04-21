@@ -27,7 +27,7 @@ interface ServerPositionRow {
   bidPrice: number; askPrice: number; bidSize: number; askSize: number
   maxSpreadDollars: number; dailyPool: number
   midPrice: number | null; bestBid: number | null; bestAsk: number | null
-  rewardSharePct: number; expectedRatePerDay: number; updatedAt: number
+  rewardSharePct: number; expectedRatePerDay: number; capitalUsd: number; updatedAt: number
 }
 interface ServerSnapshot {
   state: 'idle' | 'running' | 'stopping'
@@ -62,6 +62,7 @@ function toPosition(p: ServerPositionRow): PaperPosition {
     bidOrderId: p.bidOrderId, askOrderId: p.askOrderId,
     midPrice: p.midPrice, bestBid: p.bestBid, bestAsk: p.bestAsk,
     rewardSharePct: p.rewardSharePct, expectedRatePerDay: p.expectedRatePerDay,
+    capitalUsd: p.capitalUsd,
   }
 }
 
