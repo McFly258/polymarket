@@ -9,7 +9,7 @@ import type {
 
 export const DEFAULT_STRATEGY: StrategyConfig = {
   totalCapitalUsd: 2000,
-  perMarketCapitalUsd: 100,
+  perMarketCapitalUsd: 30,
   postingDistancePct: 0.85,
   minTicksBehindTop: 2,
   minYieldPct: 0.05,
@@ -32,6 +32,9 @@ export const DEFAULT_STRATEGY: StrategyConfig = {
   // Maximize PnL" doc for the rationale and the Iran Gulf state reference case.
   minPriceFloor: 0.05,
   minHedgeDepthMultiple: 5,
+  maxFillsPerWindow: 3,
+  fillWindowMinutes: 15,
+  blacklistMinutes: 60,
 }
 
 // ── Reward scoring ──────────────────────────────────────────────────────────

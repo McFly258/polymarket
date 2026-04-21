@@ -72,7 +72,9 @@ const MIN_PRICE_FLOOR = 0.05
 
 // C2a: max fraction of fill price we're willing to lose on the instant hedge.
 //      At post time: if (fill_price − hedge_price) / fill_price > threshold, skip.
-const MAX_HEDGE_SLIPPAGE = 0.10
+//      Also re-checked at fill time — if the book moved worse than this, we use
+//      a passive limit hedge instead of crossing the spread.
+const MAX_HEDGE_SLIPPAGE = 0.03
 
 // C2b: the hedge side of the book must hold at least this multiple of our
 //      order size in visible depth (top-10 levels). Guards against thin books
@@ -249,6 +251,9 @@ export class BackendPaperEngine {
   private startedAt: number | null = null
   private config: StrategyConfig | null = null
   private positions = new Map<string, InternalPosition>()
+  // Adverse-selection detector state
+  private fillHistory = new Map<string, Array<{ side: 'bid' | 'ask'; time: number }>>()
+  private blacklist = new Map<string, number>() // conditionId → expiry timestamp (ms)
   private rewardTotal = 0
   private rewardLastRate = 0
   private rewardLastUpdatedAt = Date.now()
@@ -417,6 +422,16 @@ export class BackendPaperEngine {
     const bestBid = yesBook.bestBid ?? 0
     const bestAsk = yesBook.bestAsk ?? 1
     const tag = alloc.conditionId.slice(0, 8)
+
+    // Adverse-selection blacklist: skip markets closed out for repeated bad fills
+    const blacklistExpiry = this.blacklist.get(alloc.conditionId)
+    if (blacklistExpiry !== undefined) {
+      if (Date.now() < blacklistExpiry) {
+        console.log(`[engine] skip ${tag} — adverse-selection blacklist (expires ${new Date(blacklistExpiry).toISOString()})`)
+        return
+      }
+      this.blacklist.delete(alloc.conditionId)
+    }
 
     // C1: price floor — skip penny/near-zero books
     if (bestBid < MIN_PRICE_FLOOR || bestAsk < MIN_PRICE_FLOOR) {
@@ -667,8 +682,21 @@ export class BackendPaperEngine {
     const orderSize = side === 'bid' ? pos.bidSize : pos.askSize
     updateOrderStatus(orderId, 'filled', Date.now())
 
-    const hedgePrice = side === 'bid' ? (view.bestBid ?? orderPrice) : (view.bestAsk ?? orderPrice)
+    // Re-check hedge slippage at fill time. The book may have moved significantly
+    // since the order was posted. If current slippage exceeds the threshold, clamp
+    // the hedge price to the last-known good level (passive limit) rather than
+    // crossing the spread and eating a large taker loss.
+    const rawHedgePrice = side === 'bid' ? (view.bestBid ?? orderPrice) : (view.bestAsk ?? orderPrice)
+    const fillTimeSlip = side === 'bid'
+      ? (orderPrice - rawHedgePrice) / orderPrice
+      : (rawHedgePrice - orderPrice) / orderPrice
+    const hedgePrice = fillTimeSlip > MAX_HEDGE_SLIPPAGE
+      ? orderPrice  // passive limit at fill price — zero slippage, waits for a cross
+      : rawHedgePrice
     const hedgeSide = side === 'bid' ? 'sell' : 'buy'
+    if (fillTimeSlip > MAX_HEDGE_SLIPPAGE) {
+      console.log(`[engine] fill-time slippage ${(fillTimeSlip * 100).toFixed(1)}% > ${(MAX_HEDGE_SLIPPAGE * 100).toFixed(0)}% on ${pos.conditionId.slice(0, 8)} — passive hedge at ${orderPrice}`)
+    }
     const gross = side === 'bid'
       ? (hedgePrice - orderPrice) * orderSize
       : (orderPrice - hedgePrice) * orderSize
@@ -698,6 +726,42 @@ export class BackendPaperEngine {
       updateFillHedge(fillId, hedgeRes.id, 'done')
     } catch {
       updateFillHedge(fillId, null, 'failed')
+    }
+
+    // Adverse-selection detector: track same-side fills in a rolling window.
+    // Too many fills on the same side = a smarter participant has an information
+    // edge; cut the position and blacklist the market to stop re-entry.
+    const cfg = this.config ?? ({} as StrategyConfig)
+    const maxFills = cfg.maxFillsPerWindow ?? 3
+    const windowMs = (cfg.fillWindowMinutes ?? 15) * 60_000
+    const blacklistMs = (cfg.blacklistMinutes ?? 60) * 60_000
+    const condId = pos.conditionId
+
+    if (!this.fillHistory.has(condId)) this.fillHistory.set(condId, [])
+    const hist = this.fillHistory.get(condId)!
+    const now = Date.now()
+    hist.push({ side, time: now })
+    // Prune stale entries and keep only same-side fills in the window
+    const pruned = hist.filter((e) => e.time >= now - windowMs)
+    this.fillHistory.set(condId, pruned)
+    const sameSideFills = pruned.filter((e) => e.side === side).length
+
+    if (sameSideFills >= maxFills) {
+      console.log(`[engine] adverse-selection on ${condId.slice(0, 8)} — ${sameSideFills}× ${side} fills in ${cfg.fillWindowMinutes ?? 15}m, closing + blacklisting ${cfg.blacklistMinutes ?? 60}m`)
+      this.blacklist.set(condId, now + blacklistMs)
+      this.fillHistory.delete(condId)
+      void this.closePosition(condId)
+
+      const tgToken = process.env.TELEGRAM_BOT_TOKEN
+      const tgChat = process.env.TELEGRAM_CHAT_ID
+      if (tgToken && tgChat) {
+        const msg = `🚨 Adverse selection: ${sameSideFills}× ${side} fills in ${cfg.fillWindowMinutes ?? 15}m\n${pos.question}\nPosition closed. Blacklisted ${cfg.blacklistMinutes ?? 60}m.`
+        void fetch(`https://api.telegram.org/bot${tgToken}/sendMessage`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ chat_id: tgChat, text: msg }),
+        }).catch(() => {})
+      }
     }
   }
 

@@ -210,6 +210,9 @@ export function OrderBookPanel({ position, bidOrder, askOrder, slug }: Props) {
             {level.size.toFixed(0)}
           </span>
         </td>
+        <td className="num dim" style={{ minWidth: 60 }}>
+          ${(level.size * level.price).toFixed(0)}
+        </td>
         <td className="num dim" style={{ minWidth: 110 }}>
           {ours && ourSize !== null
             ? <span style={{ color: '#60a5fa' }}>◀ ours {ourSize.toFixed(0)}</span>
@@ -312,13 +315,14 @@ export function OrderBookPanel({ position, bidOrder, askOrder, slug }: Props) {
             <tr>
               <th style={{ textAlign: 'left' }}>Price</th>
               <th style={{ textAlign: 'left' }}>Size (shares)</th>
+              <th style={{ textAlign: 'left' }}>USD</th>
               <th></th>
             </tr>
           </thead>
           <tbody>
             {asks.slice().reverse().map((l) => row(l, 'ask', ourAskPrice !== null && priceKey(l.price) === priceKey(ourAskPrice), askOrder?.size ?? null))}
             <tr>
-              <td colSpan={3} style={{ padding: '6px 0', borderTop: '1px dashed rgba(148,163,184,0.3)', borderBottom: '1px dashed rgba(148,163,184,0.3)', textAlign: 'center', fontSize: '0.78rem', color: '#94a3b8' }}>
+              <td colSpan={4} style={{ padding: '6px 0', borderTop: '1px dashed rgba(148,163,184,0.3)', borderBottom: '1px dashed rgba(148,163,184,0.3)', textAlign: 'center', fontSize: '0.78rem', color: '#94a3b8' }}>
                 spread {book.spread !== null ? (book.spread * 100).toFixed(1) + '¢' : '—'}
               </td>
             </tr>

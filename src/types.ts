@@ -165,6 +165,16 @@ export interface StrategyConfig {
    * on a fill. Optional for back-compat with stored configs.
    */
   minHedgeDepthMultiple?: number
+  /**
+   * Adverse-selection detector: max same-side fills within fillWindowMinutes
+   * before the engine closes the position and blacklists the market.
+   * Optional — defaults to 3.
+   */
+  maxFillsPerWindow?: number
+  /** Rolling window length for the fill counter, in minutes. Defaults to 15. */
+  fillWindowMinutes?: number
+  /** How long (minutes) to blacklist a market after triggering. Defaults to 60. */
+  blacklistMinutes?: number
 }
 
 /** Per-market daily volatility estimate (std-dev of mid moves, in dollars). */
