@@ -13,6 +13,7 @@ import type { FillEvent } from '../services/paperTrading'
 
 const HOUR_MS = 3_600_000
 const TOP_N_POSITIONS = 8
+const TOP_N_REWARD_POSITIONS = 10
 const POSITION_COLORS = [
   '#4ade80', '#60a5fa', '#f472b6', '#fbbf24', '#a78bfa',
   '#f87171', '#34d399', '#22d3ee', '#fb923c', '#c084fc',
@@ -159,7 +160,7 @@ export function PnLChart({ refreshKey = 0 }: Props) {
     return () => { cancelled = true }
   }, [backend, refreshKey])
 
-  const { totalSeries, positionSeries, topPositions } = useMemo(() => {
+  const { totalSeries, positionSeries, topPositions, rewardSeries, topRewardPositions } = useMemo(() => {
     const rewardByHour = buildRewardSeries(rewardHistory)
     const realisedByHour = buildRealisedSeries(fills)
     const positionRealised = buildPerPositionRealisedSeries(fills)
@@ -228,7 +229,42 @@ export function PnLChart({ refreshKey = 0 }: Props) {
       .slice(0, TOP_N_POSITIONS)
 
     const positionSeries = positionSeriesFull.map((x) => x.point)
-    return { totalSeries, positionSeries, topPositions: top }
+
+    // ── Rewards-only series per position (cumulative earned rewards/hour) ─
+    const lastRewardPerCond = new Map<string, number>()
+    for (const cid of allConditions) lastRewardPerCond.set(cid, 0)
+
+    const rewardSeriesFull: Array<{ point: PositionPoint; perCond: Map<string, number> }> = hours.map((h) => {
+      const point: PositionPoint = { hourEpoch: h, hourLabel: hourLabel(h) }
+      const perCond = new Map<string, number>()
+      for (const cid of allConditions) {
+        const wMap = positionReward.get(cid)
+        if (wMap?.has(h)) lastRewardPerCond.set(cid, wMap.get(h) ?? lastRewardPerCond.get(cid) ?? 0)
+        const v = lastRewardPerCond.get(cid) ?? 0
+        point[cid] = Number(v.toFixed(4))
+        perCond.set(cid, v)
+      }
+      return { point, perCond }
+    })
+
+    // Pick top-N conditions by final cumulative reward (highest earners).
+    const finalRewardByCond = new Map<string, number>()
+    if (rewardSeriesFull.length > 0) {
+      const final = rewardSeriesFull[rewardSeriesFull.length - 1].perCond
+      for (const [cid, v] of final) finalRewardByCond.set(cid, v)
+    }
+    const topReward = [...allConditions]
+      .map((cid) => ({
+        conditionId: cid,
+        question: questionByCondition.get(cid) ?? fills.find((f) => f.conditionId === cid)?.question ?? cid.slice(0, 8),
+        reward: finalRewardByCond.get(cid) ?? 0,
+      }))
+      .filter((x) => x.reward > 0)
+      .sort((a, b) => b.reward - a.reward)
+      .slice(0, TOP_N_REWARD_POSITIONS)
+
+    const rewardSeries = rewardSeriesFull.map((x) => x.point)
+    return { totalSeries, positionSeries, topPositions: top, rewardSeries, topRewardPositions: topReward }
   }, [rewardHistory, positionHistory, fills])
 
   if (loading && totalSeries.length === 0) {
@@ -270,6 +306,65 @@ export function PnLChart({ refreshKey = 0 }: Props) {
               <Line type="monotone" dataKey="rewards" name="Rewards" stroke="#4ade80" strokeWidth={2} dot={false} />
               <Line type="monotone" dataKey="realised" name="Realised hedge P&L" stroke="#f87171" strokeWidth={2} dot={false} />
               <Line type="monotone" dataKey="net" name="Net P&L" stroke="#60a5fa" strokeWidth={2.5} dot={false} />
+            </LineChart>
+          </ResponsiveContainer>
+        </div>
+      </div>
+
+      <div>
+        <h3 className="panel-subhead">
+          Cumulative rewards per position (top {topRewardPositions.length} earners)
+        </h3>
+        <div style={{ width: '100%', height: 300 }}>
+          <ResponsiveContainer>
+            <LineChart data={rewardSeries} margin={{ top: 8, right: 16, bottom: 8, left: 8 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
+              <XAxis dataKey="hourLabel" stroke="#94a3b8" fontSize={11} />
+              <YAxis
+                stroke="#94a3b8"
+                fontSize={11}
+                tickFormatter={(v: number) => formatUsd(v)}
+                width={70}
+              />
+              <Tooltip
+                content={(props) => {
+                  const { active, payload, label } = props as unknown as {
+                    active?: boolean
+                    payload?: Array<{ dataKey?: string; value?: number | string; color?: string }>
+                    label?: string
+                  }
+                  if (!active || !payload?.length) return null
+                  const sorted = [...payload].sort(
+                    (a, b) => Number(b.value ?? 0) - Number(a.value ?? 0),
+                  )
+                  return (
+                    <div style={{ background: '#0f172a', border: '1px solid #334155', padding: 8, fontSize: 12, maxWidth: 420 }}>
+                      <div style={{ color: '#e2e8f0', marginBottom: 4 }}>{label}</div>
+                      {sorted.map((p) => {
+                        const cid = String(p.dataKey ?? '')
+                        const tp = topRewardPositions.find((t) => t.conditionId === cid)
+                        return (
+                          <div key={cid} style={{ color: p.color, display: 'flex', justifyContent: 'space-between', gap: 12 }}>
+                            <span>{truncate(tp?.question ?? cid, 50)}</span>
+                            <span>{formatUsd(Number(p.value ?? 0))}</span>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  )
+                }}
+              />
+              {topRewardPositions.map((p, i) => (
+                <Line
+                  key={p.conditionId}
+                  type="monotone"
+                  dataKey={p.conditionId}
+                  name={truncate(p.question, 40)}
+                  stroke={POSITION_COLORS[i % POSITION_COLORS.length]}
+                  strokeWidth={1.5}
+                  dot={false}
+                />
+              ))}
             </LineChart>
           </ResponsiveContainer>
         </div>
