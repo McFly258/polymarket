@@ -88,6 +88,11 @@ export function PaperTradingPanel({ rows, config, sim }: Props) {
   const snap = useFacadeSnapshot(facade)
   const [busy, setBusy] = useState(false)
   const [expandedBookIds, setExpandedBookIds] = useState<Set<string>>(() => new Set())
+  const slugByCondition = useMemo(() => {
+    const m = new Map<string, string>()
+    for (const r of rows) m.set(r.conditionId, r.slug)
+    return m
+  }, [rows])
   function toggleBook(conditionId: string) {
     setExpandedBookIds((prev) => {
       const next = new Set(prev)
@@ -300,6 +305,7 @@ export function PaperTradingPanel({ rows, config, sim }: Props) {
                             position={p}
                             bidOrder={bidOrder ?? null}
                             askOrder={askOrder ?? null}
+                            slug={slugByCondition.get(p.conditionId) ?? null}
                           />
                         </td>
                       </tr>

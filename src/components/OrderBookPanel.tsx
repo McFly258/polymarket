@@ -1,24 +1,99 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
+import {
+  CartesianGrid, Line, LineChart, ResponsiveContainer,
+  Tooltip, XAxis, YAxis, Legend,
+} from 'recharts'
 import { fetchBooks, type BookLevel, type BookView } from '../api/polymarket'
-import { formatPrice } from '../constants'
-import type { PaperPosition, PhantomOrder } from '../services/paperTrading'
+import { formatPrice, formatUsd } from '../constants'
+import {
+  getBackendEngine,
+  type PositionRewardHourlyPoint,
+} from '../services/backendEngine'
+import type {
+  FillEvent,
+  PaperPosition,
+  PhantomOrder,
+} from '../services/paperTrading'
 
 const POLL_MS = 1500
+const HOUR_MS = 3_600_000
 
 interface Props {
   position: PaperPosition
   bidOrder: PhantomOrder | null
   askOrder: PhantomOrder | null
+  slug: string | null
+}
+
+interface ChartPoint {
+  hourEpoch: number
+  hourLabel: string
+  rewards: number
+  realised: number
+  net: number
 }
 
 function priceKey(p: number): string {
   return p.toFixed(3)
 }
 
-export function OrderBookPanel({ position, bidOrder, askOrder }: Props) {
+function hourLabel(hourEpoch: number): string {
+  const d = new Date(hourEpoch)
+  return `${d.getUTCMonth() + 1}/${d.getUTCDate()} ${String(d.getUTCHours()).padStart(2, '0')}:00`
+}
+
+function buildSeries(
+  rewards: PositionRewardHourlyPoint[],
+  fills: FillEvent[],
+): ChartPoint[] {
+  const rewardByHour = new Map<number, number>()
+  let cumReward = 0
+  const sortedRewards = [...rewards].sort((a, b) => a.hourEpoch - b.hourEpoch)
+  for (const r of sortedRewards) {
+    cumReward += r.earnedThisHourUsd
+    rewardByHour.set(r.hourEpoch, cumReward)
+  }
+
+  const realisedByHour = new Map<number, number>()
+  const fillsByHour = new Map<number, number>()
+  for (const f of fills) {
+    const h = Math.floor(f.filledAt / HOUR_MS) * HOUR_MS
+    fillsByHour.set(h, (fillsByHour.get(h) ?? 0) + f.realisedPnlUsd)
+  }
+  let cumRealised = 0
+  for (const h of [...fillsByHour.keys()].sort((a, b) => a - b)) {
+    cumRealised += fillsByHour.get(h) ?? 0
+    realisedByHour.set(h, cumRealised)
+  }
+
+  const hourSet = new Set<number>([...rewardByHour.keys(), ...realisedByHour.keys()])
+  const hours = [...hourSet].sort((a, b) => a - b)
+  let lastReward = 0
+  let lastRealised = 0
+  return hours.map((h) => {
+    if (rewardByHour.has(h)) lastReward = rewardByHour.get(h) ?? lastReward
+    if (realisedByHour.has(h)) lastRealised = realisedByHour.get(h) ?? lastRealised
+    return {
+      hourEpoch: h,
+      hourLabel: hourLabel(h),
+      rewards: Number(lastReward.toFixed(4)),
+      realised: Number(lastRealised.toFixed(4)),
+      net: Number((lastReward + lastRealised).toFixed(4)),
+    }
+  })
+}
+
+export function OrderBookPanel({ position, bidOrder, askOrder, slug }: Props) {
   const [book, setBook] = useState<BookView | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
+
+  // Per-position chart state
+  const backend = getBackendEngine()
+  const [rewards, setRewards] = useState<PositionRewardHourlyPoint[]>([])
+  const [fills, setFills] = useState<FillEvent[]>([])
+  const [chartLoading, setChartLoading] = useState(true)
+  const [chartError, setChartError] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -48,6 +123,40 @@ export function OrderBookPanel({ position, bidOrder, askOrder }: Props) {
       window.clearInterval(id)
     }
   }, [position.tokenId])
+
+  // Fetch per-position history once on mount + every 5 min while expanded.
+  useEffect(() => {
+    let cancelled = false
+
+    async function load() {
+      try {
+        const [r, f] = await Promise.all([
+          backend.fetchPositionRewardHistory(position.conditionId, 720),
+          backend.fetchFillsHistory(10_000),
+        ])
+        if (cancelled) return
+        setRewards(r)
+        setFills(f.filter((x) => x.conditionId === position.conditionId))
+        setChartError(null)
+      } catch (e) {
+        if (!cancelled) setChartError((e as Error).message)
+      } finally {
+        if (!cancelled) setChartLoading(false)
+      }
+    }
+
+    void load()
+    const id = window.setInterval(() => void load(), 5 * 60_000)
+    return () => {
+      cancelled = true
+      window.clearInterval(id)
+    }
+  }, [backend, position.conditionId])
+
+  const series = useMemo(() => buildSeries(rewards, fills), [rewards, fills])
+  const finalNet = series.length > 0 ? series[series.length - 1].net : 0
+  const finalRewards = series.length > 0 ? series[series.length - 1].rewards : 0
+  const finalRealised = series.length > 0 ? series[series.length - 1].realised : 0
 
   function mergeOurOrder(
     levels: BookLevel[],
@@ -120,6 +229,72 @@ export function OrderBookPanel({ position, bidOrder, askOrder }: Props) {
         margin: '4px 0',
       }}
     >
+      <div style={{ marginBottom: 10 }}>
+        {slug ? (
+          <a
+            href={`https://polymarket.com/market/${slug}`}
+            target="_blank"
+            rel="noreferrer"
+            style={{ fontWeight: 600, color: '#60a5fa', textDecoration: 'none' }}
+          >
+            {position.question} ↗
+          </a>
+        ) : (
+          <span style={{ fontWeight: 600 }}>{position.question}</span>
+        )}
+      </div>
+
+      <div style={{ marginBottom: 10 }}>
+        <div className="helper-text" style={{ fontSize: '0.78rem', marginBottom: 6 }}>
+          PnL: rewards{' '}
+          <strong style={{ color: '#4ade80' }}>{formatUsd(finalRewards)}</strong>
+          {' · '}realised{' '}
+          <strong style={{ color: finalRealised >= 0 ? '#4ade80' : '#ef4444' }}>
+            {finalRealised >= 0 ? '+' : ''}{formatUsd(finalRealised)}
+          </strong>
+          {' · '}net{' '}
+          <strong style={{ color: finalNet >= 0 ? '#4ade80' : '#ef4444' }}>
+            {finalNet >= 0 ? '+' : ''}{formatUsd(finalNet)}
+          </strong>
+        </div>
+        {chartError && (
+          <p style={{ color: '#ef4444', fontSize: '0.8rem', margin: '4px 0' }}>
+            Chart error: {chartError}
+          </p>
+        )}
+        {chartLoading && series.length === 0 ? (
+          <p className="dim" style={{ fontSize: '0.8rem', margin: '8px 0' }}>Loading PnL history…</p>
+        ) : series.length === 0 ? (
+          <p className="dim" style={{ fontSize: '0.8rem', margin: '8px 0' }}>
+            No hourly snapshots yet for this position.
+          </p>
+        ) : (
+          <div style={{ width: '100%', height: 180 }}>
+            <ResponsiveContainer>
+              <LineChart data={series} margin={{ top: 4, right: 12, bottom: 4, left: 4 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
+                <XAxis dataKey="hourLabel" stroke="#94a3b8" fontSize={10} />
+                <YAxis
+                  stroke="#94a3b8"
+                  fontSize={10}
+                  tickFormatter={(v: number) => formatUsd(v)}
+                  width={60}
+                />
+                <Tooltip
+                  contentStyle={{ background: '#0f172a', border: '1px solid #334155' }}
+                  labelStyle={{ color: '#e2e8f0' }}
+                  formatter={(v, name) => [formatUsd(Number(v ?? 0)), String(name)]}
+                />
+                <Legend wrapperStyle={{ fontSize: 11 }} />
+                <Line type="monotone" dataKey="rewards" name="Rewards" stroke="#4ade80" strokeWidth={1.5} dot={false} />
+                <Line type="monotone" dataKey="realised" name="Realised" stroke="#f87171" strokeWidth={1.5} dot={false} />
+                <Line type="monotone" dataKey="net" name="Net" stroke="#60a5fa" strokeWidth={2} dot={false} />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+        )}
+      </div>
+
       <div className="helper-text" style={{ fontSize: '0.78rem', marginBottom: 8 }}>
         mid {position.midPrice !== null ? formatPrice(position.midPrice) : '—'}
         {' · '}spread {book?.spread !== null && book?.spread !== undefined ? (book.spread * 100).toFixed(1) + '¢' : '—'}
