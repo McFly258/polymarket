@@ -126,6 +126,7 @@ export function PaperTradingPanel({ rows, config, sim }: Props) {
   const fillsCount = snap.fills.length
   const restingCount = snap.orders.filter((o) => o.status === 'resting').length
   const portfolioRate = snap.positions.reduce((s, p) => s + p.expectedRatePerDay, 0)
+  const deployedCapital = snap.positions.reduce((s, p) => s + (p.capitalUsd ?? snap.config.perMarketCapitalUsd ?? 0), 0)
 
   async function handleStart() {
     if (sim.allocations.length === 0) return
@@ -209,6 +210,10 @@ export function PaperTradingPanel({ rows, config, sim }: Props) {
           <div className="kpi-value">{restingCount}</div>
         </div>
         <div className="sim-kpi">
+          <div className="kpi-label">Capital deployed</div>
+          <div className="kpi-value">{formatUsd(deployedCapital)}</div>
+        </div>
+        <div className="sim-kpi">
           <div className="kpi-label">Live $/day rate</div>
           <div className="kpi-value">{formatUsd(portfolioRate)}</div>
         </div>
@@ -283,7 +288,7 @@ export function PaperTradingPanel({ rows, config, sim }: Props) {
                       <td className="num">
                         {askOrder ? `${formatPrice(askOrder.price)} × ${askOrder.size.toFixed(0)}` : <span className="dim">filled</span>}
                       </td>
-                      <td className="num dim">{formatUsd(snap.config.perMarketCapitalUsd ?? 0)}</td>
+                      <td className="num dim">{formatUsd(p.capitalUsd ?? snap.config.perMarketCapitalUsd ?? 0)}</td>
                       <td className="num">{p.rewardSharePct.toFixed(1)}%</td>
                       <td className="num kpi-green">{formatUsd(p.expectedRatePerDay)}</td>
                       <td>
