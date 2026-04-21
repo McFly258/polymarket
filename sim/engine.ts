@@ -693,12 +693,24 @@ export class BackendPaperEngine {
     const fillTimeSlip = side === 'bid'
       ? (orderPrice - rawHedgePrice) / orderPrice
       : (rawHedgePrice - orderPrice) / orderPrice
-    const hedgePrice = fillTimeSlip > MAX_HEDGE_SLIPPAGE
+    const isPassiveHedge = fillTimeSlip > MAX_HEDGE_SLIPPAGE
+    const hedgePrice = isPassiveHedge
       ? orderPrice  // passive limit at fill price — zero slippage, waits for a cross
       : rawHedgePrice
     const hedgeSide = side === 'bid' ? 'sell' : 'buy'
-    if (fillTimeSlip > MAX_HEDGE_SLIPPAGE) {
-      console.log(`[engine] fill-time slippage ${(fillTimeSlip * 100).toFixed(1)}% > ${(MAX_HEDGE_SLIPPAGE * 100).toFixed(0)}% on ${pos.conditionId.slice(0, 8)} — passive hedge at ${orderPrice}`)
+    if (isPassiveHedge) {
+      console.log(`[engine] fill-time slippage ${(fillTimeSlip * 100).toFixed(1)}% > ${(MAX_HEDGE_SLIPPAGE * 100).toFixed(0)}% on ${pos.conditionId.slice(0, 8)} — passive hedge at ${orderPrice}, cancelling opposite side`)
+      // Prevent naked-inventory compounding: cancel the opposite-side resting
+      // quote immediately so it cannot be adversely filled while we're waiting
+      // for a passive hedge to clear.
+      const oppositeOrderId = side === 'bid' ? pos.askOrderId : pos.bidOrderId
+      if (oppositeOrderId) {
+        if (side === 'bid') pos.askOrderId = null
+        else pos.bidOrderId = null
+        void this.broker.cancelOrder(oppositeOrderId).then(() => {
+          updateOrderStatus(oppositeOrderId, 'cancelled', Date.now())
+        })
+      }
     }
     const gross = side === 'bid'
       ? (hedgePrice - orderPrice) * orderSize
@@ -729,6 +741,30 @@ export class BackendPaperEngine {
       updateFillHedge(fillId, hedgeRes.id, 'done')
     } catch {
       updateFillHedge(fillId, null, 'failed')
+    }
+
+    // If we had to go passive on the hedge, the market has moved against us
+    // and carrying unhedged inventory here is a losing proposition. Close the
+    // position and blacklist the market for a cooldown so realloc won't re-enter.
+    if (isPassiveHedge) {
+      const blMs = (this.config?.blacklistMinutes ?? 60) * 60_000
+      const bl = Date.now() + blMs
+      this.blacklist.set(pos.conditionId, bl)
+      this.fillHistory.delete(pos.conditionId)
+      this.marketPnlHistory.delete(pos.conditionId)
+      void this.closePosition(pos.conditionId)
+
+      const tgToken = process.env.TELEGRAM_BOT_TOKEN
+      const tgChat = process.env.TELEGRAM_CHAT_ID
+      if (tgToken && tgChat) {
+        const msg = `⚠️ Unhedged fill: ${(fillTimeSlip * 100).toFixed(1)}% slippage on ${side}\n${pos.question}\nOpposite side cancelled. Blacklisted ${this.config?.blacklistMinutes ?? 60}m.`
+        void fetch(`https://api.telegram.org/bot${tgToken}/sendMessage`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ chat_id: tgChat, text: msg }),
+        }).catch(() => {})
+      }
+      return
     }
 
     // Adverse-selection detector: track same-side fills in a rolling window.
