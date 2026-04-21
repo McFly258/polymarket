@@ -183,14 +183,15 @@ export interface StrategyConfig {
    */
   minExpectedRewardSharePct?: number
   /**
-   * Daily drawdown circuit breaker. If the sum of realised fill PnL over the last
-   * `dailyLossWindowHours` drops below −`dailyLossLimitUsd`, the engine stops
-   * itself and fires a Telegram alert. Prevents a correlated bad day from
-   * compounding. Optional — defaults to $20 / 24h. Set to 0 to disable.
+   * Per-market drawdown blacklist. If realised fill PnL on a single market over
+   * the last `marketLossWindowHours` drops below −`marketLossLimitUsd`, the
+   * position is closed and the market is blacklisted for `blacklistMinutes`
+   * (reuses the adverse-selection blacklist). Other markets keep trading.
+   * Defaults to $5 / 24h. Set to 0 to disable.
    */
-  dailyLossLimitUsd?: number
-  /** Rolling window for the drawdown check, in hours. Defaults to 24. */
-  dailyLossWindowHours?: number
+  marketLossLimitUsd?: number
+  /** Rolling window for the per-market drawdown check, in hours. Defaults to 24. */
+  marketLossWindowHours?: number
 }
 
 /** Per-market daily volatility estimate (std-dev of mid moves, in dollars). */

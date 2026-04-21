@@ -36,8 +36,8 @@ export const DEFAULT_STRATEGY: StrategyConfig = {
   fillWindowMinutes: 15,
   blacklistMinutes: 60,
   minExpectedRewardSharePct: 15,
-  dailyLossLimitUsd: 20,
-  dailyLossWindowHours: 24,
+  marketLossLimitUsd: 5,
+  marketLossWindowHours: 24,
 }
 
 // ── Reward scoring ──────────────────────────────────────────────────────────

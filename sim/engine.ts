@@ -254,9 +254,8 @@ export class BackendPaperEngine {
   // Adverse-selection detector state
   private fillHistory = new Map<string, Array<{ side: 'bid' | 'ask'; time: number }>>()
   private blacklist = new Map<string, number>() // conditionId → expiry timestamp (ms)
-  // Daily drawdown circuit breaker — rolling realised PnL per fill
-  private pnlHistory: Array<{ time: number; pnl: number }> = []
-  private breakerTripped = false
+  // Per-market drawdown — rolling realised PnL per fill, keyed by conditionId
+  private marketPnlHistory = new Map<string, Array<{ time: number; pnl: number }>>()
   private rewardTotal = 0
   private rewardLastRate = 0
   private rewardLastUpdatedAt = Date.now()
@@ -298,8 +297,7 @@ export class BackendPaperEngine {
     this.state = 'running'
     this.startedAt = opts.resumed && opts.prevStartedAt ? opts.prevStartedAt : Date.now()
     this.config = config
-    this.breakerTripped = false
-    this.pnlHistory = []
+    this.marketPnlHistory.clear()
 
     writeEngineState({
       state: 'running',
@@ -769,29 +767,34 @@ export class BackendPaperEngine {
       }
     }
 
-    // Daily drawdown circuit breaker. Track every fill's realised PnL in a
-    // rolling window; if cumulative loss exceeds the configured limit, stop
-    // the engine so a correlated bad day can't compound.
-    const lossLimit = cfg.dailyLossLimitUsd ?? 20
-    const lossWindowMs = (cfg.dailyLossWindowHours ?? 24) * 60 * 60_000
-    if (lossLimit > 0) {
-      this.pnlHistory.push({ time: now, pnl: realisedPnl })
-      this.pnlHistory = this.pnlHistory.filter((e) => e.time >= now - lossWindowMs)
-      const windowPnl = this.pnlHistory.reduce((s, e) => s + e.pnl, 0)
-      if (!this.breakerTripped && windowPnl <= -lossLimit) {
-        this.breakerTripped = true
-        console.log(`[engine] 🛑 daily drawdown breaker tripped — window PnL $${windowPnl.toFixed(2)} ≤ −$${lossLimit}, stopping engine`)
+    // Per-market drawdown blacklist. Track each fill's realised PnL keyed by
+    // market; if rolling-window losses on a single market breach the limit,
+    // close + blacklist that market only — the rest of the engine keeps running.
+    const marketLossLimit = cfg.marketLossLimitUsd ?? 5
+    const marketLossWindowMs = (cfg.marketLossWindowHours ?? 24) * 60 * 60_000
+    if (marketLossLimit > 0 && !this.blacklist.has(condId)) {
+      const mhist = this.marketPnlHistory.get(condId) ?? []
+      mhist.push({ time: now, pnl: realisedPnl })
+      const prunedPnl = mhist.filter((e) => e.time >= now - marketLossWindowMs)
+      this.marketPnlHistory.set(condId, prunedPnl)
+      const marketWindowPnl = prunedPnl.reduce((s, e) => s + e.pnl, 0)
+      if (marketWindowPnl <= -marketLossLimit) {
+        const windowH = cfg.marketLossWindowHours ?? 24
+        console.log(`[engine] 🛑 market drawdown on ${condId.slice(0, 8)} — $${marketWindowPnl.toFixed(2)} in ${windowH}h ≤ −$${marketLossLimit}, closing + blacklisting ${cfg.blacklistMinutes ?? 60}m`)
+        this.blacklist.set(condId, now + blacklistMs)
+        this.marketPnlHistory.delete(condId)
+        void this.closePosition(condId)
+
         const tgToken = process.env.TELEGRAM_BOT_TOKEN
         const tgChat = process.env.TELEGRAM_CHAT_ID
         if (tgToken && tgChat) {
-          const msg = `🛑 Daily drawdown breaker\nRealised PnL $${windowPnl.toFixed(2)} in ${cfg.dailyLossWindowHours ?? 24}h ≤ −$${lossLimit}\nEngine stopped. Restart manually after review.`
+          const msg = `🛑 Market drawdown: $${marketWindowPnl.toFixed(2)} in ${windowH}h ≤ −$${marketLossLimit}\n${pos.question}\nPosition closed. Blacklisted ${cfg.blacklistMinutes ?? 60}m.`
           void fetch(`https://api.telegram.org/bot${tgToken}/sendMessage`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ chat_id: tgChat, text: msg }),
           }).catch(() => {})
         }
-        void this.stop()
       }
     }
   }
