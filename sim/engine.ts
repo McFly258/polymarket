@@ -853,15 +853,17 @@ export class BackendPaperEngine {
       const marketWindowPnl = prunedPnl.reduce((s, e) => s + e.pnl, 0)
       if (marketWindowPnl <= -marketLossLimit) {
         const windowH = cfg.marketLossWindowHours ?? 24
-        console.log(`[engine] 🛑 market drawdown on ${condId.slice(0, 8)} — $${marketWindowPnl.toFixed(2)} in ${windowH}h ≤ −$${marketLossLimit}, closing + blacklisting ${cfg.blacklistMinutes ?? 60}m`)
-        this.blacklist.set(condId, now + blacklistMs)
+        const lossBlMinutes = cfg.marketLossBlacklistMinutes ?? cfg.blacklistMinutes ?? 60
+        const lossBlMs = lossBlMinutes * 60_000
+        console.log(`[engine] 🛑 market drawdown on ${condId.slice(0, 8)} — $${marketWindowPnl.toFixed(2)} in ${windowH}h ≤ −$${marketLossLimit}, closing + blacklisting ${lossBlMinutes}m`)
+        this.blacklist.set(condId, now + lossBlMs)
         this.marketPnlHistory.delete(condId)
         void this.closePosition(condId)
 
         const tgToken = process.env.TELEGRAM_BOT_TOKEN
         const tgChat = process.env.TELEGRAM_CHAT_ID
         if (tgToken && tgChat) {
-          const msg = `🛑 Market drawdown: $${marketWindowPnl.toFixed(2)} in ${windowH}h ≤ −$${marketLossLimit}\n${pos.question}\nPosition closed. Blacklisted ${cfg.blacklistMinutes ?? 60}m.`
+          const msg = `🛑 Market drawdown: $${marketWindowPnl.toFixed(2)} in ${windowH}h ≤ −$${marketLossLimit}\n${pos.question}\nPosition closed. Blacklisted ${lossBlMinutes}m.`
           void fetch(`https://api.telegram.org/bot${tgToken}/sendMessage`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },

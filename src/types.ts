@@ -185,13 +185,20 @@ export interface StrategyConfig {
   /**
    * Per-market drawdown blacklist. If realised fill PnL on a single market over
    * the last `marketLossWindowHours` drops below −`marketLossLimitUsd`, the
-   * position is closed and the market is blacklisted for `blacklistMinutes`
-   * (reuses the adverse-selection blacklist). Other markets keep trading.
-   * Defaults to $5 / 24h. Set to 0 to disable.
+   * position is closed and the market is blacklisted for
+   * `marketLossBlacklistMinutes` (falling back to `blacklistMinutes`). Other
+   * markets keep trading. Defaults to $3 / 24h. Set to 0 to disable.
    */
   marketLossLimitUsd?: number
   /** Rolling window for the per-market drawdown check, in hours. Defaults to 24. */
   marketLossWindowHours?: number
+  /**
+   * Blacklist duration (minutes) when the per-market drawdown trigger fires.
+   * Longer than the adverse-selection blacklist because a realised loss is
+   * stronger evidence the market is structurally bad for us. Defaults to 240
+   * (4h). Falls back to `blacklistMinutes` if unset.
+   */
+  marketLossBlacklistMinutes?: number
   /**
    * Resolution wind-down. Unconditionally close held positions when their
    * market has fewer than this many days to resolution. Entry is still gated by
