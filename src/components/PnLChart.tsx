@@ -13,7 +13,7 @@ import type { FillEvent } from '../services/paperTrading'
 
 const HOUR_MS = 3_600_000
 const TOP_N_POSITIONS = 8
-const TOP_N_REWARD_POSITIONS = 10
+const TOP_N_REWARD_POSITIONS = 20
 const POSITION_COLORS = [
   '#4ade80', '#60a5fa', '#f472b6', '#fbbf24', '#a78bfa',
   '#f87171', '#34d399', '#22d3ee', '#fb923c', '#c084fc',
