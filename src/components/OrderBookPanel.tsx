@@ -4,7 +4,8 @@ import {
   Tooltip, XAxis, YAxis, Legend,
 } from 'recharts'
 import { fetchBooks, type BookLevel, type BookView } from '../api/polymarket'
-import { formatPrice, formatUsd } from '../constants'
+import { formatHourLabel, formatPrice, formatUsd } from '../constants'
+import { useTimezone } from '../context/TimezoneContext'
 import {
   getBackendEngine,
   type PositionRewardHourlyPoint,
@@ -37,14 +38,11 @@ function priceKey(p: number): string {
   return p.toFixed(3)
 }
 
-function hourLabel(hourEpoch: number): string {
-  const d = new Date(hourEpoch)
-  return `${d.getUTCMonth() + 1}/${d.getUTCDate()} ${String(d.getUTCHours()).padStart(2, '0')}:00`
-}
 
 function buildSeries(
   rewards: PositionRewardHourlyPoint[],
   fills: FillEvent[],
+  tz = 'UTC',
 ): ChartPoint[] {
   const rewardByHour = new Map<number, number>()
   let cumReward = 0
@@ -75,7 +73,7 @@ function buildSeries(
     if (realisedByHour.has(h)) lastRealised = realisedByHour.get(h) ?? lastRealised
     return {
       hourEpoch: h,
-      hourLabel: hourLabel(h),
+      hourLabel: formatHourLabel(h, tz),
       rewards: Number(lastReward.toFixed(4)),
       realised: Number(lastRealised.toFixed(4)),
       net: Number((lastReward + lastRealised).toFixed(4)),
@@ -84,6 +82,7 @@ function buildSeries(
 }
 
 export function OrderBookPanel({ position, bidOrder, askOrder, slug }: Props) {
+  const { timezone } = useTimezone()
   const [book, setBook] = useState<BookView | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
@@ -153,7 +152,7 @@ export function OrderBookPanel({ position, bidOrder, askOrder, slug }: Props) {
     }
   }, [backend, position.conditionId])
 
-  const series = useMemo(() => buildSeries(rewards, fills), [rewards, fills])
+  const series = useMemo(() => buildSeries(rewards, fills, timezone), [rewards, fills, timezone])
   const finalNet = series.length > 0 ? series[series.length - 1].net : 0
   const finalRewards = series.length > 0 ? series[series.length - 1].rewards : 0
   const finalRealised = series.length > 0 ? series[series.length - 1].realised : 0

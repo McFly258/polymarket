@@ -9,6 +9,7 @@ import {
 } from './services/dashboard'
 import { DEFAULT_STRATEGY, runSimulation } from './services/strategy'
 import { startMarketStream, type ConnectionState } from './services/wsClient'
+import { TimezoneProvider } from './context/TimezoneContext'
 import { HeroPanel } from './components/HeroPanel'
 import { StatCards } from './components/StatCards'
 import { FilterBar } from './components/FilterBar'
@@ -194,6 +195,7 @@ function App() {
   )
 
   return (
+    <TimezoneProvider>
     <main className="app-shell">
       <HeroPanel
         updatedAt={data?.updatedAt ?? null}
@@ -254,6 +256,7 @@ function App() {
         ) : null
       })()}
     </main>
+    </TimezoneProvider>
   )
 }
 

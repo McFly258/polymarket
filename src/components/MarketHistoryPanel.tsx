@@ -1,18 +1,13 @@
 import { useEffect, useState } from 'react'
 import type { BookHistoryPoint, MarketHistoryData, RewardHistoryPoint } from '../types'
 import { Sparkline } from './Sparkline'
-import { formatUsd } from '../constants'
+import { formatTs, formatUsd } from '../constants'
+import { useTimezone } from '../context/TimezoneContext'
 
 interface Props {
   conditionId: string
   question: string
   onClose: () => void
-}
-
-function formatTs(ts: number) {
-  return new Date(ts).toLocaleString(undefined, {
-    month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
-  })
 }
 
 function OutcomeHistory({ outcome, points }: { outcome: string; points: BookHistoryPoint[] }) {
@@ -49,6 +44,7 @@ function OutcomeHistory({ outcome, points }: { outcome: string; points: BookHist
 }
 
 function RewardHistory({ points }: { points: RewardHistoryPoint[] }) {
+  const { timezone } = useTimezone()
   const rates = points.map((p) => p.daily_rate)
   const last = points[points.length - 1]
   const first = points[0]
@@ -57,7 +53,7 @@ function RewardHistory({ points }: { points: RewardHistoryPoint[] }) {
     <div className="reward-history">
       <div className="outcome-history-header">
         <strong>Daily reward pool</strong>
-        <span className="helper-text">{points.length} snapshots · {formatTs(first.ts)} → {formatTs(last.ts)}</span>
+        <span className="helper-text">{points.length} snapshots · {formatTs(first.ts, timezone)} → {formatTs(last.ts, timezone)}</span>
       </div>
       <div className="outcome-history-row">
         <span className="helper-text">Daily USDC</span>
@@ -77,7 +73,7 @@ function RewardHistory({ points }: { points: RewardHistoryPoint[] }) {
           <tbody>
             {[...points].reverse().slice(0, 48).map((p) => (
               <tr key={p.ts}>
-                <td className="dim">{formatTs(p.ts)}</td>
+                <td className="dim">{formatTs(p.ts, timezone)}</td>
                 <td className="num">{formatUsd(p.daily_rate)}</td>
                 <td className="num">{p.max_spread.toFixed(2)}</td>
                 <td className="num">{p.min_size}</td>

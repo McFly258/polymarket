@@ -1,5 +1,6 @@
 import { memo, useState } from 'react'
 import { formatCents, formatEndDate, formatMaxSpread, formatPrice, formatUsd } from '../constants'
+import { useTimezone } from '../context/TimezoneContext'
 import type { BookSnapshot, RewardsRow } from '../types'
 
 type Props = {
@@ -56,6 +57,7 @@ type RowProps = {
 }
 
 const MarketRow = memo(function MarketRow({ row, selected, onSelect }: RowProps) {
+  const { timezone } = useTimezone()
   return (
     <tr
       className={selected ? 'row-selected' : 'row-clickable'}
@@ -83,7 +85,7 @@ const MarketRow = memo(function MarketRow({ row, selected, onSelect }: RowProps)
         </div>
       </td>
       <td><StatusBadge row={row} /></td>
-      <td className="dim">{formatEndDate(row.endDateIso)}</td>
+      <td className="dim">{formatEndDate(row.endDateIso, timezone)}</td>
     </tr>
   )
 })

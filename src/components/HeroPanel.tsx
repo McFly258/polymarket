@@ -1,4 +1,5 @@
 import { formatUpdatedAt } from '../constants'
+import { TIMEZONES, useTimezone } from '../context/TimezoneContext'
 import type { ConnectionState } from '../services/wsClient'
 
 type Props = {
@@ -36,6 +37,8 @@ export function HeroPanel({
 }: Props) {
   const ws = wsLabel(wsState)
   const streamedTokens = streamedCount
+  const { timezone, setTimezone } = useTimezone()
+
   return (
     <header className="hero-panel">
       <div>
@@ -47,6 +50,16 @@ export function HeroPanel({
         </p>
       </div>
       <div className="hero-meta">
+        <select
+          className="tz-select"
+          value={timezone}
+          onChange={(e) => setTimezone(e.target.value)}
+          title="Display timezone"
+        >
+          {TIMEZONES.map((t) => (
+            <option key={t.value} value={t.value}>{t.label}</option>
+          ))}
+        </select>
         <button className="refresh-button" onClick={onRefresh} disabled={loading}>
           {loading ? 'Refreshing…' : 'Resync'}
         </button>
@@ -54,7 +67,7 @@ export function HeroPanel({
           <span className={ws.className} /> {ws.label}
           {streamedTokens > 0 ? ` · ${streamedTokens} streams` : ''}
         </span>
-        <span>{updatedAt ? `Updated ${formatUpdatedAt(updatedAt)}` : 'Loading live data…'}</span>
+        <span>{updatedAt ? `Updated ${formatUpdatedAt(updatedAt, timezone)}` : 'Loading live data…'}</span>
       </div>
     </header>
   )
