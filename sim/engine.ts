@@ -95,8 +95,8 @@ const MAX_DAILY_STDDEV = 0.04
 // C7: binary-extreme exclusion.
 //     Markets near certainty (mid > MAX_MID_PRICE) or near-zero (mid < MIN_MID_PRICE)
 //     carry asymmetric resolution risk that overwhelms reward accrual.
-const MIN_MID_PRICE = 0.05
-const MAX_MID_PRICE = 0.95
+const MIN_MID_PRICE = 0.20
+const MAX_MID_PRICE = 0.80
 
 // C4: mid-drift cancel — if the live best bid/ask drifts within this many ticks
 //     of our posted price, cancel immediately rather than waiting for a fill or
