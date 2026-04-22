@@ -398,6 +398,11 @@ export function runSimulation(
   // prioritise our strongest edges.
   const topUpEnabled = config.topUpWinnersEnabled ?? true
   const topUpMultiplier = config.topUpMultiplier ?? 2
+  // Extreme-price markets carry asymmetric slippage — a 1¢ book move on a
+  // topped-up 200-share position is $2 of loss, and high-price binaries move
+  // in larger discrete jumps around news events. Keep these at base size.
+  const TOP_UP_MIN_MID = 0.35
+  const TOP_UP_MAX_MID = 0.65
   if (topUpEnabled && topUpMultiplier > 1) {
     const topUpConfig: StrategyConfig = {
       ...config,
@@ -408,6 +413,8 @@ export function runSimulation(
       const orig = allocations[i]
       const row = rowById.get(orig.conditionId)
       if (!row) continue
+      const mid = orig.midPrice
+      if (mid !== null && (mid < TOP_UP_MIN_MID || mid > TOP_UP_MAX_MID)) continue
       const upsized = allocateMarket(row, topUpConfig, volatility[row.conditionId], now)
       if (!upsized) continue
       if (!upsized.warnings.every((w) => !w.includes('outside reward zone'))) continue
