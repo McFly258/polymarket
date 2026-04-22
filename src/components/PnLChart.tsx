@@ -3,7 +3,8 @@ import {
   CartesianGrid, Legend, Line, LineChart, ResponsiveContainer,
   Tooltip, XAxis, YAxis,
 } from 'recharts'
-import { formatUsd } from '../constants'
+import { formatHourLabel, formatUsd } from '../constants'
+import { useTimezone } from '../context/TimezoneContext'
 import {
   getBackendEngine,
   type PositionRewardHourlyPoint,
@@ -33,10 +34,6 @@ interface PositionPoint {
   [conditionId: string]: number | string
 }
 
-function hourLabel(hourEpoch: number): string {
-  const d = new Date(hourEpoch)
-  return `${d.getUTCMonth() + 1}/${d.getUTCDate()} ${String(d.getUTCHours()).padStart(2, '0')}:00`
-}
 
 /** Build cumulative rewards-per-hour series, carrying forward the last value
  *  into any gap hours so the chart stays connected. */
@@ -127,6 +124,7 @@ interface Props {
 }
 
 export function PnLChart({ refreshKey = 0 }: Props) {
+  const { timezone } = useTimezone()
   const backend = getBackendEngine()
   const [rewardHistory, setRewardHistory] = useState<RewardHourlyPoint[]>([])
   const [positionHistory, setPositionHistory] = useState<PositionRewardHourlyPoint[]>([])
@@ -182,7 +180,7 @@ export function PnLChart({ refreshKey = 0 }: Props) {
       if (realisedByHour.has(h)) lastRealised = realisedByHour.get(h) ?? lastRealised
       return {
         hourEpoch: h,
-        hourLabel: hourLabel(h),
+        hourLabel: formatHourLabel(h, timezone),
         rewards: Number(lastReward.toFixed(4)),
         realised: Number(lastRealised.toFixed(4)),
         net: Number((lastReward + lastRealised).toFixed(4)),
@@ -198,7 +196,7 @@ export function PnLChart({ refreshKey = 0 }: Props) {
     for (const cid of allConditions) lastPerCond.set(cid, { realised: 0, reward: 0 })
 
     const positionSeriesFull: Array<{ point: PositionPoint; perCond: Map<string, number> }> = hours.map((h) => {
-      const point: PositionPoint = { hourEpoch: h, hourLabel: hourLabel(h) }
+      const point: PositionPoint = { hourEpoch: h, hourLabel: formatHourLabel(h, timezone) }
       const perCond = new Map<string, number>()
       for (const cid of allConditions) {
         const last = lastPerCond.get(cid)!
@@ -235,7 +233,7 @@ export function PnLChart({ refreshKey = 0 }: Props) {
     for (const cid of allConditions) lastRewardPerCond.set(cid, 0)
 
     const rewardSeriesFull: Array<{ point: PositionPoint; perCond: Map<string, number> }> = hours.map((h) => {
-      const point: PositionPoint = { hourEpoch: h, hourLabel: hourLabel(h) }
+      const point: PositionPoint = { hourEpoch: h, hourLabel: formatHourLabel(h, timezone) }
       const perCond = new Map<string, number>()
       for (const cid of allConditions) {
         const wMap = positionReward.get(cid)
@@ -265,7 +263,7 @@ export function PnLChart({ refreshKey = 0 }: Props) {
 
     const rewardSeries = rewardSeriesFull.map((x) => x.point)
     return { totalSeries, positionSeries, topPositions: top, rewardSeries, topRewardPositions: topReward }
-  }, [rewardHistory, positionHistory, fills])
+  }, [rewardHistory, positionHistory, fills, timezone])
 
   if (loading && totalSeries.length === 0) {
     return <p className="helper-text">Loading chart data…</p>

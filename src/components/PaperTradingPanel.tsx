@@ -1,5 +1,6 @@
 import { Fragment, useEffect, useMemo, useState, useSyncExternalStore } from 'react'
-import { formatPrice, formatUsd } from '../constants'
+import { formatPrice, formatShortTime, formatUsd } from '../constants'
+import { useTimezone } from '../context/TimezoneContext'
 import { getBackendEngine, type BackendEngineClient } from '../services/backendEngine'
 import { getPaperEngine, type EngineSnapshot } from '../services/paperTrading'
 import type { RewardsRow, SimulationResult, StrategyConfig } from '../types'
@@ -58,9 +59,6 @@ function useFacadeSnapshot(facade: EngineFacade): EngineSnapshot {
   )
 }
 
-function shortTime(ts: number): string {
-  return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
-}
 
 function durationSince(ts: number | null): string {
   if (!ts) return '—'
@@ -73,6 +71,7 @@ function durationSince(ts: number | null): string {
 }
 
 export function PaperTradingPanel({ rows, config, sim }: Props) {
+  const { timezone } = useTimezone()
   const browserEngine = getPaperEngine()
   const backendClient = getBackendEngine()
   // Default to the backend engine — it's the one that keeps trading across
@@ -132,7 +131,7 @@ export function PaperTradingPanel({ rows, config, sim }: Props) {
     if (sim.allocations.length === 0) return
     setBusy(true)
     try {
-      await engine.start(sim.allocations, rows, config)
+      await facade.start()
     } finally {
       setBusy(false)
     }
@@ -141,7 +140,7 @@ export function PaperTradingPanel({ rows, config, sim }: Props) {
   async function handleStop() {
     setBusy(true)
     try {
-      await engine.stop()
+      await facade.stop()
     } finally {
       setBusy(false)
     }
@@ -197,7 +196,7 @@ export function PaperTradingPanel({ rows, config, sim }: Props) {
         <button
           type="button"
           className="refresh-button"
-          onClick={() => engine.resetHistory()}
+          onClick={() => void facade.resetHistory()}
           disabled={busy || snap.state === 'running'}
         >
           Clear history
@@ -354,7 +353,7 @@ export function PaperTradingPanel({ rows, config, sim }: Props) {
                   (f.side === 'bid' ? f.fillPrice - f.hedgePrice : f.hedgePrice - f.fillPrice) * 100
                 return (
                   <tr key={f.id}>
-                    <td className="dim">{shortTime(f.filledAt)}</td>
+                    <td className="dim">{formatShortTime(f.filledAt, timezone)}</td>
                     <td className="question-cell" title={f.question}>
                       {f.question.length > 50 ? f.question.slice(0, 50) + '…' : f.question}
                     </td>
