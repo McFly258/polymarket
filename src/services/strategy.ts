@@ -10,7 +10,7 @@ import type {
 export const DEFAULT_STRATEGY: StrategyConfig = {
   totalCapitalUsd: 2000,
   perMarketCapitalUsd: 30,
-  postingDistancePct: 0.85,
+  postingDistancePct: 0.7,
   minTicksBehindTop: 2,
   minYieldPct: 0.05,
   minDaysToResolution: 7,
