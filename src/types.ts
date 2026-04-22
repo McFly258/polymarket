@@ -200,6 +200,19 @@ export interface StrategyConfig {
    */
   marketLossBlacklistMinutes?: number
   /**
+   * Portfolio-wide loss circuit breaker. If realised fill PnL summed across
+   * every market over the last `globalLossWindowHours` drops below
+   * −`globalLossLimitUsd`, all positions are closed and new allocations are
+   * suppressed for `globalPauseMinutes`. Sits on top of the per-market
+   * breaker — catches the case where many markets bleed small amounts
+   * simultaneously. Defaults to $15 / 24h / 120m pause. Set limit to 0 to disable.
+   */
+  globalLossLimitUsd?: number
+  /** Rolling window for the portfolio-wide drawdown check, in hours. Defaults to 24. */
+  globalLossWindowHours?: number
+  /** Pause duration (minutes) when the portfolio drawdown trigger fires. Defaults to 120 (2h). */
+  globalPauseMinutes?: number
+  /**
    * Resolution wind-down. Unconditionally close held positions when their
    * market has fewer than this many days to resolution. Entry is still gated by
    * `minDaysToResolution`; this protects positions whose market drifted into

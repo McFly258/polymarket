@@ -257,6 +257,9 @@ export class BackendPaperEngine {
   private blacklist = new Map<string, number>() // conditionId → expiry timestamp (ms)
   // Per-market drawdown — rolling realised PnL per fill, keyed by conditionId
   private marketPnlHistory = new Map<string, Array<{ time: number; pnl: number }>>()
+  // Portfolio-wide drawdown — rolling realised PnL across every market
+  private portfolioPnlHistory: Array<{ time: number; pnl: number }> = []
+  private globalPauseUntil = 0
   private rewardTotal = 0
   private rewardLastRate = 0
   private rewardLastUpdatedAt = Date.now()
@@ -299,6 +302,8 @@ export class BackendPaperEngine {
     this.startedAt = opts.resumed && opts.prevStartedAt ? opts.prevStartedAt : Date.now()
     this.config = config
     this.marketPnlHistory.clear()
+    this.portfolioPnlHistory = []
+    this.globalPauseUntil = 0
 
     writeEngineState({
       state: 'running',
@@ -372,6 +377,10 @@ export class BackendPaperEngine {
   //   – existing position, still allocated but price drifted > 1 tick → replace
   private async reallocate(): Promise<void> {
     if (this.state !== 'running' || !this.config) return
+    if (Date.now() < this.globalPauseUntil) {
+      console.log(`[engine] reallocate skipped — global pause active until ${new Date(this.globalPauseUntil).toISOString()}`)
+      return
+    }
     console.log('[engine] reallocating…')
     let rows: RewardsRow[]
     try {
@@ -864,6 +873,39 @@ export class BackendPaperEngine {
         const tgChat = process.env.TELEGRAM_CHAT_ID
         if (tgToken && tgChat) {
           const msg = `🛑 Market drawdown: $${marketWindowPnl.toFixed(2)} in ${windowH}h ≤ −$${marketLossLimit}\n${pos.question}\nPosition closed. Blacklisted ${lossBlMinutes}m.`
+          void fetch(`https://api.telegram.org/bot${tgToken}/sendMessage`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ chat_id: tgChat, text: msg }),
+          }).catch(() => {})
+        }
+      }
+    }
+
+    // Portfolio-wide drawdown. Tracks realised fill PnL across every market; if
+    // the 24h rolling sum breaches the limit we pause the entire engine for a
+    // cool-down. Sits on top of the per-market breaker so a broad-based bleed
+    // across many markets still trips even when no single market hits its cap.
+    const globalLossLimit = cfg.globalLossLimitUsd ?? 15
+    const globalLossWindowMs = (cfg.globalLossWindowHours ?? 24) * 60 * 60_000
+    if (globalLossLimit > 0 && Date.now() >= this.globalPauseUntil) {
+      this.portfolioPnlHistory.push({ time: now, pnl: realisedPnl })
+      this.portfolioPnlHistory = this.portfolioPnlHistory.filter((e) => e.time >= now - globalLossWindowMs)
+      const portfolioWindowPnl = this.portfolioPnlHistory.reduce((s, e) => s + e.pnl, 0)
+      if (portfolioWindowPnl <= -globalLossLimit) {
+        const windowH = cfg.globalLossWindowHours ?? 24
+        const pauseMin = cfg.globalPauseMinutes ?? 120
+        this.globalPauseUntil = now + pauseMin * 60_000
+        console.log(`[engine] 🛑🛑 PORTFOLIO DRAWDOWN — $${portfolioWindowPnl.toFixed(2)} in ${windowH}h ≤ −$${globalLossLimit}, closing all positions + pausing ${pauseMin}m`)
+        this.portfolioPnlHistory = []
+        for (const heldId of [...this.positions.keys()]) {
+          void this.closePosition(heldId)
+        }
+
+        const tgToken = process.env.TELEGRAM_BOT_TOKEN
+        const tgChat = process.env.TELEGRAM_CHAT_ID
+        if (tgToken && tgChat) {
+          const msg = `🛑🛑 PORTFOLIO DRAWDOWN: $${portfolioWindowPnl.toFixed(2)} in ${windowH}h ≤ −$${globalLossLimit}\nAll positions closed. Engine paused ${pauseMin}m.`
           void fetch(`https://api.telegram.org/bot${tgToken}/sendMessage`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
