@@ -22,6 +22,7 @@ import {
 import {
   MIN_PRICE_FLOOR,
   MAX_HEDGE_SLIPPAGE,
+  MAX_HEDGE_SLIPPAGE_ABS,
   MIN_HEDGE_DEPTH_RATIO,
   MIN_BOOK_LEVELS,
   MIN_BOOK_DEPTH_SHARES,
@@ -173,10 +174,16 @@ export async function openPosition(
   // C2a: simulated hedge slippage at post time.
   //   bid fills → hedge by selling at bestBid. Loss = bidPrice − bestBid.
   //   ask fills → hedge by buying  at bestAsk. Loss = bestAsk − askPrice.
+  // Trip on either the % cap (low-price markets) or the absolute cent cap
+  // (high-price markets where 3% is 2¢+ of drift) — whichever is tighter.
   const bidHedgeSlip = alloc.bidPrice > 0 ? (alloc.bidPrice - bestBid) / alloc.bidPrice : 1
   const askHedgeSlip = alloc.askPrice > 0 ? (bestAsk - alloc.askPrice) / alloc.askPrice : 1
-  if (bidHedgeSlip > MAX_HEDGE_SLIPPAGE || askHedgeSlip > MAX_HEDGE_SLIPPAGE) {
-    console.log(`[engine] skip ${tag} — C2a hedge slippage (bid=${(bidHedgeSlip * 100).toFixed(1)}% ask=${(askHedgeSlip * 100).toFixed(1)}% > ${MAX_HEDGE_SLIPPAGE * 100}%)`)
+  const bidSlipAbs = Math.abs(alloc.bidPrice - bestBid)
+  const askSlipAbs = Math.abs(bestAsk - alloc.askPrice)
+  const bidTrip = bidHedgeSlip > MAX_HEDGE_SLIPPAGE || bidSlipAbs > MAX_HEDGE_SLIPPAGE_ABS
+  const askTrip = askHedgeSlip > MAX_HEDGE_SLIPPAGE || askSlipAbs > MAX_HEDGE_SLIPPAGE_ABS
+  if (bidTrip || askTrip) {
+    console.log(`[engine] skip ${tag} — C2a hedge slippage (bid=${(bidHedgeSlip * 100).toFixed(1)}%/$${bidSlipAbs.toFixed(3)} ask=${(askHedgeSlip * 100).toFixed(1)}%/$${askSlipAbs.toFixed(3)} caps=${MAX_HEDGE_SLIPPAGE * 100}%/$${MAX_HEDGE_SLIPPAGE_ABS})`)
     return
   }
 

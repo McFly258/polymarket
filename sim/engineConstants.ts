@@ -11,6 +11,11 @@ export const MIN_PRICE_FLOOR = 0.05
 // C2a: max fraction of fill price we're willing to lose on the instant hedge.
 export const MAX_HEDGE_SLIPPAGE = 0.03
 
+// C2a+: absolute cent cap — at high prices (>0.70) the 3% fraction tolerates
+// more cents of drift than the spread can absorb; cap in absolute cents.
+// Whichever is tighter (pct or abs) wins.
+export const MAX_HEDGE_SLIPPAGE_ABS = 0.015
+
 // C2b: hedge side must hold at least this multiple of our order size in visible depth.
 export const MIN_HEDGE_DEPTH_RATIO = 5
 

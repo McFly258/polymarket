@@ -16,6 +16,7 @@ import {
   DRIFT_CANCEL_TICKS,
   INVENTORY_BIAS_DECAY_MS,
   MAX_HEDGE_SLIPPAGE,
+  MAX_HEDGE_SLIPPAGE_ABS,
   REPOSITION_DELAY_MS,
   TICK,
 } from './engineConstants.ts'
@@ -100,13 +101,21 @@ export async function handleFill(
   const fillTimeSlip = side === 'bid'
     ? (orderPrice - rawHedgePrice) / orderPrice
     : (rawHedgePrice - orderPrice) / orderPrice
-  const isPassiveHedge = fillTimeSlip > MAX_HEDGE_SLIPPAGE
+  const fillTimeSlipAbs = Math.abs(orderPrice - rawHedgePrice)
+  // Trip on whichever cap is tighter — the % protects low-price markets, the
+  // absolute cent cap protects high-price markets where 3% is 2¢+ of drift.
+  const tripPct = fillTimeSlip > MAX_HEDGE_SLIPPAGE
+  const tripAbs = fillTimeSlipAbs > MAX_HEDGE_SLIPPAGE_ABS
+  const isPassiveHedge = tripPct || tripAbs
   const hedgePrice = isPassiveHedge
     ? orderPrice  // passive limit at fill price — zero slippage, waits for a cross
     : rawHedgePrice
   const hedgeSide = side === 'bid' ? 'sell' : 'buy'
   if (isPassiveHedge) {
-    console.log(`[engine] fill-time slippage ${(fillTimeSlip * 100).toFixed(1)}% > ${(MAX_HEDGE_SLIPPAGE * 100).toFixed(0)}% on ${pos.conditionId.slice(0, 8)} — passive hedge at ${orderPrice}, cancelling opposite side`)
+    const reason = tripAbs && !tripPct
+      ? `abs slip $${fillTimeSlipAbs.toFixed(3)} > $${MAX_HEDGE_SLIPPAGE_ABS}`
+      : `slip ${(fillTimeSlip * 100).toFixed(1)}% > ${(MAX_HEDGE_SLIPPAGE * 100).toFixed(0)}%`
+    console.log(`[engine] fill-time ${reason} on ${pos.conditionId.slice(0, 8)} — passive hedge at ${orderPrice}, cancelling opposite side`)
     // Prevent naked-inventory compounding: cancel the opposite-side resting
     // quote immediately so it cannot be adversely filled while we're waiting
     // for a passive hedge to clear.
@@ -172,7 +181,10 @@ export async function handleFill(
     engine.inventoryBias.delete(pos.conditionId)
     void closePosition(engine, pos.conditionId)
 
-    notifyTelegram(`⚠️ Unhedged fill: ${(fillTimeSlip * 100).toFixed(1)}% slippage on ${side}\n${pos.question}\nOpposite side cancelled. Blacklisted ${engine.config?.blacklistMinutes ?? 60}m.`)
+    const slipTxt = tripAbs && !tripPct
+      ? `$${fillTimeSlipAbs.toFixed(3)} abs`
+      : `${(fillTimeSlip * 100).toFixed(1)}%`
+    notifyTelegram(`⚠️ Unhedged fill: ${slipTxt} slippage on ${side}\n${pos.question}\nOpposite side cancelled. Blacklisted ${engine.config?.blacklistMinutes ?? 60}m.`)
     return
   }
 
