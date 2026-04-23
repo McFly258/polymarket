@@ -178,8 +178,9 @@ export async function openPosition(
   // (high-price markets where 3% is 2¢+ of drift) — whichever is tighter.
   const bidHedgeSlip = alloc.bidPrice > 0 ? (alloc.bidPrice - bestBid) / alloc.bidPrice : 1
   const askHedgeSlip = alloc.askPrice > 0 ? (bestAsk - alloc.askPrice) / alloc.askPrice : 1
-  const bidSlipAbs = Math.abs(alloc.bidPrice - bestBid)
-  const askSlipAbs = Math.abs(bestAsk - alloc.askPrice)
+  // Only the signed (positive) loss matters: negative means we'd profit on the hedge, never a reason to skip.
+  const bidSlipAbs = alloc.bidPrice - bestBid   // positive when our bid is above market (costly hedge)
+  const askSlipAbs = bestAsk - alloc.askPrice   // positive when our ask is below market (costly hedge)
   const bidTrip = bidHedgeSlip > MAX_HEDGE_SLIPPAGE || bidSlipAbs > MAX_HEDGE_SLIPPAGE_ABS
   const askTrip = askHedgeSlip > MAX_HEDGE_SLIPPAGE || askSlipAbs > MAX_HEDGE_SLIPPAGE_ABS
   if (bidTrip || askTrip) {

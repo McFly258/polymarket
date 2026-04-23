@@ -9,7 +9,7 @@ export const VOL_WINDOW_HOURS = 24
 export const MIN_PRICE_FLOOR = 0.05
 
 // C2a: max fraction of fill price we're willing to lose on the instant hedge.
-export const MAX_HEDGE_SLIPPAGE = 0.03
+export const MAX_HEDGE_SLIPPAGE = 0.01
 
 // C2a+: absolute cent cap — at high prices (>0.70) the 3% fraction tolerates
 // more cents of drift than the spread can absorb; cap in absolute cents.
