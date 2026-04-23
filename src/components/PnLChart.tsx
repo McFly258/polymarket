@@ -7,10 +7,11 @@ import { formatHourLabel, formatUsd } from '../constants'
 import { useTimezone } from '../context/TimezoneContext'
 import {
   getBackendEngine,
+  type CapitalPoint,
   type PositionRewardHourlyPoint,
   type RewardHourlyPoint,
 } from '../services/backendEngine'
-import type { FillEvent } from '../services/paperTrading'
+import type { FillEvent, PaperPosition } from '../services/paperTrading'
 
 const HOUR_MS = 3_600_000
 const TOP_N_POSITIONS = 8
@@ -128,7 +129,11 @@ export function PnLChart({ refreshKey = 0 }: Props) {
   const backend = getBackendEngine()
   const [rewardHistory, setRewardHistory] = useState<RewardHourlyPoint[]>([])
   const [positionHistory, setPositionHistory] = useState<PositionRewardHourlyPoint[]>([])
+  const [capitalHistory, setCapitalHistory] = useState<CapitalPoint[]>([])
   const [fills, setFills] = useState<FillEvent[]>([])
+  const [livePositions, setLivePositions] = useState<PaperPosition[]>(
+    () => backend.snapshot().positions,
+  )
   const [loading, setLoading] = useState(true)
   const [err, setErr] = useState<string | null>(null)
 
@@ -138,12 +143,14 @@ export function PnLChart({ refreshKey = 0 }: Props) {
     Promise.all([
       backend.fetchRewardHistory(720),
       backend.fetchPositionRewardHistory(undefined, 5000),
+      backend.fetchCapitalHistory(2016),
       backend.fetchFillsHistory(10_000),
     ])
-      .then(([rewards, positions, f]) => {
+      .then(([rewards, positions, capital, f]) => {
         if (cancelled) return
         setRewardHistory(rewards)
         setPositionHistory(positions)
+        setCapitalHistory(capital)
         setFills(f)
         setErr(null)
       })
@@ -157,6 +164,52 @@ export function PnLChart({ refreshKey = 0 }: Props) {
       })
     return () => { cancelled = true }
   }, [backend, refreshKey])
+
+  useEffect(() => {
+    const sample = () => {
+      setLivePositions(backend.snapshot().positions)
+    }
+    sample()
+    return backend.subscribe(sample)
+  }, [backend])
+
+  // Re-fetch capital samples every 60s so new 5-min buckets land in the
+  // chart without a page reload. Cheap: one row every 5 min.
+  useEffect(() => {
+    let cancelled = false
+    const tick = () => {
+      backend.fetchCapitalHistory(2016)
+        .then((rows) => { if (!cancelled) setCapitalHistory(rows) })
+        .catch(() => { /* transient; keep last known series */ })
+    }
+    const id = window.setInterval(tick, 60_000)
+    return () => { cancelled = true; window.clearInterval(id) }
+  }, [backend])
+
+  const totalCapital = useMemo(
+    () => livePositions.reduce((acc, p) => acc + p.capitalUsd, 0),
+    [livePositions],
+  )
+
+  const capitalSeries = useMemo(() => {
+    const fmt5Min = (t: number) => new Date(t).toLocaleTimeString([], {
+      timeZone: timezone, hour: '2-digit', minute: '2-digit',
+    })
+    const hist = [...capitalHistory]
+      .sort((a, b) => a.bucketEpoch - b.bucketEpoch)
+      .map((r) => ({
+        t: r.bucketEpoch,
+        label: fmt5Min(r.bucketEpoch),
+        capital: Number(r.totalCapitalUsd.toFixed(2)),
+      }))
+    const now = Date.now()
+    // Append a live "now" point unless the latest sample is basically up to date.
+    const last = hist[hist.length - 1]
+    if (!last || now - last.t > 30_000) {
+      hist.push({ t: now, label: `now (${fmt5Min(now)})`, capital: Number(totalCapital.toFixed(2)) })
+    }
+    return hist
+  }, [capitalHistory, totalCapital, timezone])
 
   const { totalSeries, positionSeries, topPositions, rewardSeries, topRewardPositions } = useMemo(() => {
     const rewardByHour = buildRewardSeries(rewardHistory)
@@ -425,6 +478,38 @@ export function PnLChart({ refreshKey = 0 }: Props) {
             </LineChart>
           </ResponsiveContainer>
         </div>
+      </div>
+
+      <div>
+        <h3 className="panel-subhead">
+          Total capital deployed (all positions, 5-min samples) — current {formatUsd(totalCapital)}
+        </h3>
+        <div style={{ width: '100%', height: 260 }}>
+          <ResponsiveContainer>
+            <LineChart data={capitalSeries} margin={{ top: 8, right: 16, bottom: 8, left: 8 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
+              <XAxis dataKey="label" stroke="#94a3b8" fontSize={11} />
+              <YAxis
+                stroke="#94a3b8"
+                fontSize={11}
+                tickFormatter={(v: number) => formatUsd(v)}
+                width={70}
+                domain={[0, 'auto']}
+              />
+              <Tooltip
+                contentStyle={{ background: '#0f172a', border: '1px solid #334155' }}
+                labelStyle={{ color: '#e2e8f0' }}
+                formatter={(v) => [formatUsd(Number(v ?? 0)), 'Total capital']}
+              />
+              <Line type="stepAfter" dataKey="capital" name="Total capital" stroke="#fbbf24" strokeWidth={2} dot={false} isAnimationActive={false} />
+            </LineChart>
+          </ResponsiveContainer>
+        </div>
+        {capitalSeries.length < 2 && (
+          <p className="helper-text" style={{ marginTop: 4 }}>
+            Filling in — capital is sampled every 5 minutes, aligned to the wall-clock grid.
+          </p>
+        )}
       </div>
     </div>
   )

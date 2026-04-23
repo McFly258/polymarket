@@ -5,6 +5,7 @@
 
 import {
   insertPositionRewardHourly,
+  upsertCapital5Min,
   upsertPosition,
   upsertRewardHourly,
   writeReward,
@@ -54,11 +55,15 @@ export function takeHourlySnapshot(engine: BackendPaperEngine): void {
   const now = Date.now()
   const hourEpoch = Math.floor(now / 3_600_000) * 3_600_000
 
+  let totalCapitalUsd = 0
+  for (const pos of engine.positions.values()) totalCapitalUsd += pos.capitalUsd ?? 0
+
   upsertRewardHourly({
     hourEpoch,
     snapshotAt: now,
     totalEarnedUsd: engine.rewardTotal,
     ratePerDay: engine.rewardLastRate,
+    totalCapitalUsd,
   })
 
   const posRows = Array.from(engine.positions.values()).map((pos) => ({
@@ -76,4 +81,15 @@ export function takeHourlySnapshot(engine: BackendPaperEngine): void {
   for (const pos of engine.positions.values()) pos.earnedSinceLastSnapshot = 0
 
   console.log(`[engine] hourly snapshot — total earned $${engine.rewardTotal.toFixed(4)}, ${posRows.length} positions`)
+}
+
+export const CAPITAL_SAMPLE_MS = 5 * 60_000
+
+export function takeCapitalSample(engine: BackendPaperEngine): void {
+  if (engine.state !== 'running') return
+  const now = Date.now()
+  const bucketEpoch = Math.floor(now / CAPITAL_SAMPLE_MS) * CAPITAL_SAMPLE_MS
+  let totalCapitalUsd = 0
+  for (const pos of engine.positions.values()) totalCapitalUsd += pos.capitalUsd ?? 0
+  upsertCapital5Min({ bucketEpoch, sampledAt: now, totalCapitalUsd })
 }

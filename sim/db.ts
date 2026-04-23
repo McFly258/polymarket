@@ -104,7 +104,8 @@ function initSchema(db: Database.Database) {
       hour_epoch INTEGER PRIMARY KEY,
       snapshot_at INTEGER NOT NULL,
       total_earned_usd REAL NOT NULL,
-      rate_per_day REAL NOT NULL
+      rate_per_day REAL NOT NULL,
+      total_capital_usd REAL NOT NULL DEFAULT 0
     );
 
     -- Hourly per-position reward snapshots.
@@ -121,12 +122,23 @@ function initSchema(db: Database.Database) {
 
     CREATE INDEX IF NOT EXISTS idx_pos_reward_hour ON paper_position_reward_hourly(hour_epoch DESC);
     CREATE INDEX IF NOT EXISTS idx_pos_reward_cid ON paper_position_reward_hourly(condition_id, hour_epoch DESC);
+
+    -- Total deployed capital sampled every 5 min, aligned to the 5-min grid.
+    CREATE TABLE IF NOT EXISTS paper_capital_5min (
+      bucket_epoch INTEGER PRIMARY KEY,
+      sampled_at INTEGER NOT NULL,
+      total_capital_usd REAL NOT NULL
+    );
   `)
 
   // Migrations — safe to re-run on every startup
   const existingCols = (db.pragma('table_info(paper_positions)') as { name: string }[]).map((c) => c.name)
   if (!existingCols.includes('capital_usd')) {
     db.exec(`ALTER TABLE paper_positions ADD COLUMN capital_usd REAL NOT NULL DEFAULT 30`)
+  }
+  const rewardHourlyCols = (db.pragma('table_info(paper_reward_hourly)') as { name: string }[]).map((c) => c.name)
+  if (!rewardHourlyCols.includes('total_capital_usd')) {
+    db.exec(`ALTER TABLE paper_reward_hourly ADD COLUMN total_capital_usd REAL NOT NULL DEFAULT 0`)
   }
 
   // Seed singleton rows on first run.
@@ -339,6 +351,7 @@ export function fullReset(now: number): void {
   db.prepare(`DELETE FROM paper_positions`).run()
   db.prepare(`DELETE FROM paper_reward_hourly`).run()
   db.prepare(`DELETE FROM paper_position_reward_hourly`).run()
+  db.prepare(`DELETE FROM paper_capital_5min`).run()
   writeReward({ totalEarnedUsd: 0, lastRatePerDay: 0, lastUpdatedAt: now })
   writeEngineState({ state: 'idle', startedAt: null, configJson: null, lastAllocAt: null })
 }
@@ -453,6 +466,7 @@ export interface RewardHourlyRow {
   snapshotAt: number
   totalEarnedUsd: number
   ratePerDay: number
+  totalCapitalUsd: number
 }
 
 export interface PositionRewardHourlyRow {
@@ -469,10 +483,10 @@ export function upsertRewardHourly(r: RewardHourlyRow): void {
   getDb()
     .prepare(
       `INSERT OR REPLACE INTO paper_reward_hourly
-       (hour_epoch, snapshot_at, total_earned_usd, rate_per_day)
-       VALUES (?, ?, ?, ?)`,
+       (hour_epoch, snapshot_at, total_earned_usd, rate_per_day, total_capital_usd)
+       VALUES (?, ?, ?, ?, ?)`,
     )
-    .run(r.hourEpoch, r.snapshotAt, r.totalEarnedUsd, r.ratePerDay)
+    .run(r.hourEpoch, r.snapshotAt, r.totalEarnedUsd, r.ratePerDay, r.totalCapitalUsd)
 }
 
 export function insertPositionRewardHourly(rows: PositionRewardHourlyRow[]): void {
@@ -491,15 +505,47 @@ export function insertPositionRewardHourly(rows: PositionRewardHourlyRow[]): voi
 export function readRewardHourly(limit = 168): RewardHourlyRow[] {
   const rows = getDb()
     .prepare(
-      `SELECT hour_epoch, snapshot_at, total_earned_usd, rate_per_day
+      `SELECT hour_epoch, snapshot_at, total_earned_usd, rate_per_day, total_capital_usd
        FROM paper_reward_hourly ORDER BY hour_epoch DESC LIMIT ?`,
     )
-    .all(limit) as Array<{ hour_epoch: number; snapshot_at: number; total_earned_usd: number; rate_per_day: number }>
+    .all(limit) as Array<{ hour_epoch: number; snapshot_at: number; total_earned_usd: number; rate_per_day: number; total_capital_usd: number }>
   return rows.map((r) => ({
     hourEpoch: r.hour_epoch,
     snapshotAt: r.snapshot_at,
     totalEarnedUsd: r.total_earned_usd,
     ratePerDay: r.rate_per_day,
+    totalCapitalUsd: r.total_capital_usd ?? 0,
+  }))
+}
+
+// ── 5-minute capital samples ──────────────────────────────────────────
+
+export interface Capital5MinRow {
+  bucketEpoch: number
+  sampledAt: number
+  totalCapitalUsd: number
+}
+
+export function upsertCapital5Min(r: Capital5MinRow): void {
+  getDb()
+    .prepare(
+      `INSERT OR REPLACE INTO paper_capital_5min (bucket_epoch, sampled_at, total_capital_usd)
+       VALUES (?, ?, ?)`,
+    )
+    .run(r.bucketEpoch, r.sampledAt, r.totalCapitalUsd)
+}
+
+export function readCapital5Min(limit = 288): Capital5MinRow[] {
+  const rows = getDb()
+    .prepare(
+      `SELECT bucket_epoch, sampled_at, total_capital_usd
+       FROM paper_capital_5min ORDER BY bucket_epoch DESC LIMIT ?`,
+    )
+    .all(limit) as Array<{ bucket_epoch: number; sampled_at: number; total_capital_usd: number }>
+  return rows.map((r) => ({
+    bucketEpoch: r.bucket_epoch,
+    sampledAt: r.sampled_at,
+    totalCapitalUsd: r.total_capital_usd,
   }))
 }
 

@@ -48,7 +48,7 @@ import { REALLOC_MS, REWARD_TICK_MS } from './engineConstants.ts'
 import type { EngineState, InternalPosition } from './engineTypes.ts'
 import { reallocate } from './engineAlloc.ts'
 import { evaluateBook } from './engineFill.ts'
-import { accrueRewards, takeHourlySnapshot } from './engineRewards.ts'
+import { CAPITAL_SAMPLE_MS, accrueRewards, takeCapitalSample, takeHourlySnapshot } from './engineRewards.ts'
 
 export class BackendPaperEngine {
   // State exposed to extracted modules (engineAlloc / engineFill / engineRewards).
@@ -76,6 +76,8 @@ export class BackendPaperEngine {
   private rewardTimer: NodeJS.Timeout | null = null
   private reallocTimer: NodeJS.Timeout | null = null
   private hourlySnapshotTimer: NodeJS.Timeout | null = null
+  private capitalSampleTimer: NodeJS.Timeout | null = null
+  private capitalSampleBootstrap: NodeJS.Timeout | null = null
   private ws: WsClient | null = null
 
   constructor(broker: Broker = new PaperBroker()) {
@@ -125,6 +127,7 @@ export class BackendPaperEngine {
     this.scheduleRewardTick()
     this.scheduleRealloc()
     this.scheduleHourlySnapshot()
+    this.scheduleCapitalSample()
     console.log(`[engine] started — ${this.positions.size} positions, uptime anchor ${new Date(this.startedAt).toISOString()}`)
   }
 
@@ -135,6 +138,8 @@ export class BackendPaperEngine {
     if (this.rewardTimer) { clearInterval(this.rewardTimer); this.rewardTimer = null }
     if (this.reallocTimer) { clearInterval(this.reallocTimer); this.reallocTimer = null }
     if (this.hourlySnapshotTimer) { clearInterval(this.hourlySnapshotTimer); this.hourlySnapshotTimer = null }
+    if (this.capitalSampleTimer) { clearInterval(this.capitalSampleTimer); this.capitalSampleTimer = null }
+    if (this.capitalSampleBootstrap) { clearTimeout(this.capitalSampleBootstrap); this.capitalSampleBootstrap = null }
     if (this.ws) { this.ws.stop(); this.ws = null }
 
     const now = Date.now()
@@ -235,5 +240,19 @@ export class BackendPaperEngine {
       takeHourlySnapshot(this)
       this.hourlySnapshotTimer = setInterval(() => takeHourlySnapshot(this), 3_600_000)
     }, msUntilNextHour)
+  }
+
+  private scheduleCapitalSample(): void {
+    if (this.capitalSampleTimer) clearInterval(this.capitalSampleTimer)
+    if (this.capitalSampleBootstrap) clearTimeout(this.capitalSampleBootstrap)
+    // Seed a sample immediately so the 5-min series has a starting point,
+    // then align the recurring sampler to the 5-minute wall-clock grid
+    // (…:00, :05, :10, …) so buckets are stable across restarts.
+    takeCapitalSample(this)
+    const msUntilNextBucket = CAPITAL_SAMPLE_MS - (Date.now() % CAPITAL_SAMPLE_MS)
+    this.capitalSampleBootstrap = setTimeout(() => {
+      takeCapitalSample(this)
+      this.capitalSampleTimer = setInterval(() => takeCapitalSample(this), CAPITAL_SAMPLE_MS)
+    }, msUntilNextBucket)
   }
 }

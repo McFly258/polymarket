@@ -71,6 +71,7 @@ export interface RewardHourlyPoint {
   snapshotAt: number
   totalEarnedUsd: number
   ratePerDay: number
+  totalCapitalUsd: number
 }
 
 export interface PositionRewardHourlyPoint {
@@ -83,6 +84,12 @@ export interface PositionRewardHourlyPoint {
   earnedThisHourUsd: number
 }
 
+export interface CapitalPoint {
+  bucketEpoch: number
+  sampledAt: number
+  totalCapitalUsd: number
+}
+
 export interface BackendEngineClient {
   snapshot(): EngineSnapshot
   subscribe(fn: () => void): () => void
@@ -93,6 +100,7 @@ export interface BackendEngineClient {
   lastError(): string | null
   fetchRewardHistory(limit?: number): Promise<RewardHourlyPoint[]>
   fetchPositionRewardHistory(conditionId?: string, limit?: number): Promise<PositionRewardHourlyPoint[]>
+  fetchCapitalHistory(limit?: number): Promise<CapitalPoint[]>
   fetchFillsHistory(limit?: number): Promise<FillEvent[]>
 }
 
@@ -168,6 +176,12 @@ class BackendEngineClientImpl implements BackendEngineClient {
     const res = await fetch(`${BASE}/position-reward-history?${qs.toString()}`)
     if (!res.ok) throw new Error(`position-reward-history ${res.status}`)
     return (await res.json()) as PositionRewardHourlyPoint[]
+  }
+
+  async fetchCapitalHistory(limit = 288): Promise<CapitalPoint[]> {
+    const res = await fetch(`${BASE}/capital-history?limit=${limit}`)
+    if (!res.ok) throw new Error(`capital-history ${res.status}`)
+    return (await res.json()) as CapitalPoint[]
   }
 
   async fetchFillsHistory(limit = 10_000): Promise<FillEvent[]> {

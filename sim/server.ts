@@ -13,7 +13,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'http'
 import { DEFAULT_STRATEGY } from '../src/services/strategy.ts'
 import type { StrategyConfig } from '../src/types.ts'
 import { BackendPaperEngine } from './engine.ts'
-import { readRewardHourly, readPositionRewardHourly, readAllFills } from './db.ts'
+import { readCapital5Min, readPositionRewardHourly, readRewardHourly, readAllFills } from './db.ts'
 
 const PORT = Number(process.env.PAPER_PORT ?? 7801)
 const HOST = process.env.PAPER_HOST ?? '127.0.0.1'
@@ -59,6 +59,10 @@ const server = createServer(async (req, res) => {
     if (req.method === 'GET' && url.pathname === '/reward-history') {
       const limit = Math.min(Number(url.searchParams.get('limit') ?? 168), 8760)
       return sendJson(res, 200, readRewardHourly(limit))
+    }
+    if (req.method === 'GET' && url.pathname === '/capital-history') {
+      const limit = Math.min(Number(url.searchParams.get('limit') ?? 288), 105_120)
+      return sendJson(res, 200, readCapital5Min(limit))
     }
     if (req.method === 'GET' && url.pathname === '/position-reward-history') {
       const conditionId = url.searchParams.get('conditionId') ?? undefined
