@@ -3,7 +3,10 @@
 // Split from engine.ts for file size / readability. Operates on the
 // BackendPaperEngine's public state fields; the engine still owns all state.
 
+import { Opik } from 'opik'
 import type { StrategyConfig } from '../src/types.ts'
+
+const opik = new Opik({ apiKey: process.env.OPIK_API_KEY, projectName: 'polymarket-paper' })
 import {
   deletePosition,
   insertFill,
@@ -55,6 +58,8 @@ export function evaluateBook(engine: BackendPaperEngine, tokenId: string, view: 
   if (bidDrift || askDrift) {
     const tag = pos.conditionId.slice(0, 8)
     console.log(`[engine] C4 drift-cancel ${tag} — bestBid=${view.bestBid?.toFixed(3)} ourBid=${pos.bidPrice.toFixed(3)} bestAsk=${view.bestAsk?.toFixed(3)} ourAsk=${pos.askPrice.toFixed(3)}`)
+    const driftTrace = opik.trace({ name: 'drift-cancel', input: { conditionId: pos.conditionId, question: pos.question, bidDrift, askDrift, bestBid: view.bestBid, bestAsk: view.bestAsk, ourBid: pos.bidPrice, ourAsk: pos.askPrice } })
+    driftTrace.update({ output: { cancelled: [pos.bidOrderId, pos.askOrderId].filter(Boolean) } })
     engine.positions.delete(pos.conditionId)
     const toCancel = [pos.bidOrderId, pos.askOrderId].filter((x): x is string => !!x)
     const now = Date.now()
@@ -84,6 +89,11 @@ export async function handleFill(
   const orderId = side === 'bid' ? pos.bidOrderId : pos.askOrderId
   if (!orderId) return
   const config = engine.config ?? ({ makerFeePct: 0, takerFeePct: 0 } as StrategyConfig)
+
+  const fillTrace = opik.trace({
+    name: 'fill',
+    input: { conditionId: pos.conditionId, question: pos.question, side, orderId, bestBid: view.bestBid, bestAsk: view.bestAsk, capitalUsd: pos.capitalUsd },
+  })
 
   // Clear the side immediately to prevent re-entry.
   if (side === 'bid') pos.bidOrderId = null
@@ -165,8 +175,10 @@ export async function handleFill(
       fillPrice: hedgePrice,
     })
     updateFillHedge(fillId, hedgeRes.id, 'done')
+    fillTrace.update({ output: { fillId, side, orderPrice, hedgePrice, hedgeSide, isPassiveHedge, realisedPnlUsd: realisedPnl, makerFeeUsd: makerFee, takerFeeUsd: takerFee, hedgeStatus: 'done', hedgeOrderId: hedgeRes.id } })
   } catch {
     updateFillHedge(fillId, null, 'failed')
+    fillTrace.update({ output: { fillId, side, orderPrice, hedgePrice, hedgeSide, isPassiveHedge, realisedPnlUsd: realisedPnl, hedgeStatus: 'failed' } })
   }
 
   // If we had to go passive on the hedge, the market has moved against us
@@ -185,6 +197,7 @@ export async function handleFill(
       ? `$${fillTimeSlipAbs.toFixed(3)} abs`
       : `${(fillTimeSlip * 100).toFixed(1)}%`
     notifyTelegram(`⚠️ Unhedged fill: ${slipTxt} slippage on ${side}\n${pos.question}\nOpposite side cancelled. Blacklisted ${engine.config?.blacklistMinutes ?? 60}m.`)
+    fillTrace.update({ output: { fillId, side, isPassiveHedge: true, slippage: slipTxt, breaker: 'passive-hedge-blacklist', realisedPnlUsd: realisedPnl } })
     return
   }
 
@@ -201,6 +214,7 @@ export async function handleFill(
     engine.inventoryBias.delete(condId)
     void closePosition(engine, condId)
     notifyTelegram(`🚨 Adverse selection: ${adverse.sameSideFills}× ${side} fills in ${adverse.windowMinutes}m\n${pos.question}\nPosition closed. Blacklisted ${adverse.blacklistMinutes}m.`)
+    fillTrace.update({ output: { fillId, side, breaker: 'adverse-selection', sameSideFills: adverse.sameSideFills, windowMinutes: adverse.windowMinutes, blacklistMinutes: adverse.blacklistMinutes, realisedPnlUsd: realisedPnl } })
   }
 
   // Breaker 2: per-market rolling drawdown.
@@ -212,6 +226,7 @@ export async function handleFill(
     engine.inventoryBias.delete(condId)
     void closePosition(engine, condId)
     notifyTelegram(`🛑 Market drawdown: $${market.windowPnl.toFixed(2)} in ${market.windowHours}h ≤ −$${market.lossLimitUsd}\n${pos.question}\nPosition closed. Blacklisted ${market.blacklistMinutes}m.`)
+    fillTrace.update({ output: { fillId, side, breaker: 'market-drawdown', windowPnl: market.windowPnl, windowHours: market.windowHours, lossLimitUsd: market.lossLimitUsd, realisedPnlUsd: realisedPnl } })
   }
 
   // Breaker 3: portfolio-wide drawdown — pauses the whole engine on hit.
@@ -224,5 +239,6 @@ export async function handleFill(
     engine.portfolioPnlHistory = []
     for (const heldId of [...engine.positions.keys()]) void closePosition(engine, heldId)
     notifyTelegram(`🛑🛑 PORTFOLIO DRAWDOWN: $${h.windowPnl.toFixed(2)} in ${h.windowHours}h ≤ −$${h.lossLimitUsd}\nAll positions closed. Engine paused ${h.pauseMinutes}m.`)
+    fillTrace.update({ output: { fillId, side, breaker: 'portfolio-drawdown', windowPnl: h.windowPnl, windowHours: h.windowHours, lossLimitUsd: h.lossLimitUsd, pauseMinutes: h.pauseMinutes, realisedPnlUsd: realisedPnl } })
   }
 }

@@ -10,6 +10,7 @@ WorkingDirectory=/home/ubuntu/.openclaw/workspace/polymarket
 Environment=NODE_ENV=production
 Environment=PAPER_PORT=7801
 Environment=PAPER_HOST=127.0.0.1
+EnvironmentFile=-/home/ubuntu/.openclaw/workspace/polymarket/.env
 ExecStart=/usr/bin/node --experimental-strip-types --no-warnings=ExperimentalWarning sim/server.ts
 Restart=on-failure
 RestartSec=5
