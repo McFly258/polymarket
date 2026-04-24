@@ -155,6 +155,53 @@ export class ClobBroker {
     return (await res.json()) as Record<string, unknown>
   }
 
+  // Public GET helpers exposed for the reconciler. Return raw JSON; caller
+  // decodes the specific shape. Signed with L2 headers (GET has empty body).
+  async fetchOrder(orderId: string): Promise<Record<string, unknown>> {
+    const path = `/order/${orderId}`
+    const headers = buildL2Headers(
+      'GET',
+      path,
+      '',
+      this.walletAddress,
+      this.apiSecret,
+      this.apiPassphrase,
+    )
+    const res = await fetch(`${CLOB_BASE}${path}`, { method: 'GET', headers })
+    if (!res.ok) {
+      const text = await res.text()
+      throw new Error(`CLOB GET ${path} → ${res.status}: ${text}`)
+    }
+    return (await res.json()) as Record<string, unknown>
+  }
+
+  async fetchTrades(sinceMs: number): Promise<Array<Record<string, unknown>>> {
+    const path = `/trades?maker=${this.walletAddress}&after=${Math.floor(sinceMs / 1000)}`
+    const headers = buildL2Headers(
+      'GET',
+      path,
+      '',
+      this.walletAddress,
+      this.apiSecret,
+      this.apiPassphrase,
+    )
+    const res = await fetch(`${CLOB_BASE}${path}`, { method: 'GET', headers })
+    if (!res.ok) {
+      const text = await res.text()
+      throw new Error(`CLOB GET ${path} → ${res.status}: ${text}`)
+    }
+    const body = (await res.json()) as unknown
+    if (Array.isArray(body)) return body as Array<Record<string, unknown>>
+    if (body && typeof body === 'object' && Array.isArray((body as { data?: unknown }).data)) {
+      return (body as { data: Array<Record<string, unknown>> }).data
+    }
+    return []
+  }
+
+  isEnabled(): boolean {
+    return this.isRealEnabled()
+  }
+
   async onOrderPlaced(evt: OrderPlacedEvent): Promise<void> {
     const { decisionId, paperOrder } = evt
     const postedAt = paperOrder.postedAt
@@ -201,11 +248,14 @@ export class ClobBroker {
       side: paperOrder.side,
       price: paperOrder.price,
       size: paperOrder.size,
+      filledSize: 0,
       status,
       rejectReason,
       postedAt,
       closedAt: null,
       txHash: null,
+      lastReconciledAt: null,
+      discrepancy: null,
     })
   }
 
@@ -232,18 +282,36 @@ export class ClobBroker {
   }
 
   async onOrderFilled(evt: OrderFilledEvent): Promise<void> {
-    const { decisionId, paperFill, hedgeSide, hedgeExpectedPrice, hedgeFillPrice, tokenId } =
-      evt
+    const {
+      decisionId,
+      paperFill,
+      hedgeSide,
+      hedgeExpectedPrice,
+      hedgeFillPrice,
+      tokenId,
+      isPassiveHedge,
+    } = evt
     const filledAt = paperFill.filledAt
     const dispatch = await this.dispatchAllowed()
     const realFillId = `rfill-${paperFill.id}`
 
     let hedgeOrderId: string | null = null
     let actualHedgePrice = hedgeFillPrice
-    let hedgeStatus: RealFillRow['hedgeStatus'] = dispatch ? 'pending' : 'pending'
+    let hedgeStatus: RealFillRow['hedgeStatus']
     let txHash: string | null = null
 
-    if (dispatch) {
+    if (isPassiveHedge) {
+      // Paper decided the fill was un-hedgeable (slip > cap). The real side must
+      // mirror that decision — blasting a market order here would take unbounded
+      // slippage and break the paper↔real comparison.
+      hedgeStatus = 'skipped'
+      this.logger.log(
+        `Passive hedge mirrored (decision ${decisionId}) — no real hedge dispatched`,
+      )
+    } else if (!dispatch) {
+      hedgeStatus = 'skipped'
+    } else {
+      hedgeStatus = 'pending'
       const notional = hedgeFillPrice * paperFill.size
       if (notional > this.maxNotional) {
         hedgeStatus = 'failed'
@@ -265,6 +333,8 @@ export class ClobBroker {
           hedgeOrderId = String(resp['orderID'] ?? resp['id'] ?? realFillId)
           if (typeof resp['price'] === 'number') {
             actualHedgePrice = resp['price'] as number
+          } else if (typeof resp['avgPrice'] === 'number') {
+            actualHedgePrice = resp['avgPrice'] as number
           }
           if (typeof resp['transactionHash'] === 'string') {
             txHash = resp['transactionHash'] as string
@@ -298,9 +368,11 @@ export class ClobBroker {
       hedgeOrderId,
       hedgeStatus,
       txHash,
+      clobTradeId: null,
+      source: 'paper',
     })
 
-    if (dispatch && hedgeStatus !== 'pending') {
+    if (dispatch && hedgeStatus === 'done') {
       const slippageUsd = Math.abs(actualHedgePrice - hedgeExpectedPrice) * paperFill.size
       try {
         await this.checkAndUpdateDailyLoss(slippageUsd)

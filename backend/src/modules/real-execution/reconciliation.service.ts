@@ -1,0 +1,368 @@
+import {
+  Injectable,
+  Logger,
+  OnApplicationShutdown,
+  OnModuleInit,
+} from '@nestjs/common'
+
+import { ClobBroker } from './clob-broker'
+import type { RealOrderRow } from './real-order.repo'
+import { RealOrderRepo } from './real-order.repo'
+import { RealFillRepo } from './real-fill.repo'
+import { RealStateRepo } from './real-state.repo'
+
+// Every RECONCILE_TICK_MS we poll the CLOB for each still-live real order and
+// for any trades that landed since the last run. Keeps real_orders.filled_size
+// + status in lockstep with the exchange's view, and ingests orphan trades
+// (CLOB filled us but paper never told us — e.g. late fill after drift-cancel)
+// as reconciler-sourced RealFill rows. When ENABLE_REAL_EXECUTION is false the
+// loop still ticks but short-circuits: there's nothing real to reconcile.
+const RECONCILE_TICK_MS = 30_000
+
+// Price divergence threshold between paper's expected fill and CLOB's actual
+// avg execution. One cent is wide enough to tolerate normal book jitter but
+// narrow enough to catch real divergence worth a human look.
+const PRICE_DIV_THRESHOLD = 0.01
+
+// Floating-point tolerance when comparing filled size vs order size — CLOB
+// decimal math can leave ~1e-9 residue on "fully filled" orders.
+const SIZE_EPSILON = 1e-6
+
+// Upper bound on how far back we'll ask the CLOB for trades on a single tick.
+// Bounded to keep cold-start / long-outage catch-ups from scanning forever.
+const MAX_TRADE_LOOKBACK_MS = 6 * 60 * 60 * 1000 // 6h
+
+export interface ReconciliationStatus {
+  enabled: boolean
+  running: boolean
+  lastTickAt: number | null
+  lastTickDurationMs: number | null
+  lastTickError: string | null
+  totalTicks: number
+  totalOrdersReconciled: number
+  totalFillsIngested: number
+  totalDiscrepancies: number
+  totalErrors: number
+  openOrders: number
+  discrepancyOrders: number
+}
+
+interface ClobOrderView {
+  matchedSize: number
+  status: string
+  avgPrice: number | null
+}
+
+@Injectable()
+export class ReconciliationService implements OnModuleInit, OnApplicationShutdown {
+  private readonly logger = new Logger(ReconciliationService.name)
+
+  private timer: NodeJS.Timeout | null = null
+  private running = false
+  private lastTickAt: number | null = null
+  private lastTickDurationMs: number | null = null
+  private lastTickError: string | null = null
+  private totalTicks = 0
+  private totalOrdersReconciled = 0
+  private totalFillsIngested = 0
+  private totalDiscrepancies = 0
+  private totalErrors = 0
+
+  constructor(
+    private readonly broker: ClobBroker,
+    private readonly orderRepo: RealOrderRepo,
+    private readonly fillRepo: RealFillRepo,
+    private readonly stateRepo: RealStateRepo,
+  ) {}
+
+  onModuleInit(): void {
+    // The timer ticks even when disabled — runOnce short-circuits early. That
+    // way flipping ENABLE_REAL_EXECUTION at runtime doesn't need a restart.
+    this.timer = setInterval(() => {
+      void this.runOnce().catch((err) => {
+        this.logger.error(
+          `reconciler tick crashed: ${err instanceof Error ? err.message : String(err)}`,
+        )
+      })
+    }, RECONCILE_TICK_MS)
+    this.logger.log(`Reconciler armed — ticking every ${RECONCILE_TICK_MS}ms`)
+  }
+
+  onApplicationShutdown(): void {
+    if (this.timer) {
+      clearInterval(this.timer)
+      this.timer = null
+    }
+  }
+
+  async getStatus(): Promise<ReconciliationStatus> {
+    const [openOrders, discrepancyOrders] = await Promise.all([
+      this.orderRepo.readOpen(),
+      this.orderRepo.countDiscrepancies(),
+    ])
+    return {
+      enabled: this.broker.isEnabled(),
+      running: this.running,
+      lastTickAt: this.lastTickAt,
+      lastTickDurationMs: this.lastTickDurationMs,
+      lastTickError: this.lastTickError,
+      totalTicks: this.totalTicks,
+      totalOrdersReconciled: this.totalOrdersReconciled,
+      totalFillsIngested: this.totalFillsIngested,
+      totalDiscrepancies: this.totalDiscrepancies,
+      totalErrors: this.totalErrors,
+      openOrders: openOrders.length,
+      discrepancyOrders,
+    }
+  }
+
+  async runOnce(): Promise<ReconciliationStatus> {
+    if (this.running) {
+      // A tick is already in flight — skip rather than stack. Force-run from
+      // the admin endpoint will just return current status.
+      return this.getStatus()
+    }
+    this.running = true
+    const startedAt = Date.now()
+    this.lastTickError = null
+    try {
+      // Short-circuit the whole tick when real dispatch is off or paused. We
+      // still advance totalTicks so the status view shows the loop is alive.
+      if (!this.broker.isEnabled()) {
+        this.totalTicks++
+        return this.getStatus()
+      }
+      const state = await this.stateRepo.read()
+      if (state.paused) {
+        this.totalTicks++
+        return this.getStatus()
+      }
+
+      await this.reconcileOpenOrders()
+      await this.ingestOrphanTrades()
+      this.totalTicks++
+    } catch (err) {
+      this.lastTickError = err instanceof Error ? err.message : String(err)
+      this.totalErrors++
+      this.logger.error(`runOnce failed: ${this.lastTickError}`)
+    } finally {
+      this.lastTickAt = Date.now()
+      this.lastTickDurationMs = this.lastTickAt - startedAt
+      this.running = false
+    }
+    return this.getStatus()
+  }
+
+  private async reconcileOpenOrders(): Promise<void> {
+    const openOrders = await this.orderRepo.readOpen()
+    for (const row of openOrders) {
+      try {
+        const raw = await this.broker.fetchOrder(row.id)
+        const view = this.parseClobOrder(raw)
+        await this.applyOrderPatch(row, view)
+        this.totalOrdersReconciled++
+      } catch (err) {
+        this.totalErrors++
+        this.logger.warn(
+          `reconcile order ${row.id} failed: ${err instanceof Error ? err.message : String(err)}`,
+        )
+      }
+    }
+  }
+
+  private async ingestOrphanTrades(): Promise<void> {
+    const lastTs = await this.orderRepo.lastReconciledAt()
+    const sinceMs = Math.max(
+      lastTs ?? Date.now() - MAX_TRADE_LOOKBACK_MS,
+      Date.now() - MAX_TRADE_LOOKBACK_MS,
+    )
+    let trades: Array<Record<string, unknown>>
+    try {
+      trades = await this.broker.fetchTrades(sinceMs)
+    } catch (err) {
+      this.totalErrors++
+      this.logger.warn(
+        `fetchTrades failed: ${err instanceof Error ? err.message : String(err)}`,
+      )
+      return
+    }
+
+    for (const t of trades) {
+      const tradeId = asString(t['id']) ?? asString(t['trade_id'])
+      if (!tradeId) continue
+      // Dedup — if we already ingested this trade on a prior tick or recorded
+      // it synchronously from an ORDER_FILLED event, skip.
+      if (await this.fillRepo.findByClobTradeId(tradeId)) continue
+
+      const orderId = asString(t['order_id']) ?? asString(t['maker_order_id'])
+      const price = asNumber(t['price'])
+      const size = asNumber(t['size']) ?? asNumber(t['match_size'])
+      const side = asString(t['side'])?.toLowerCase()
+      const tokenId = asString(t['asset_id']) ?? asString(t['token_id'])
+      const filledAt = asNumber(t['timestamp'])
+      if (price === null || size === null || filledAt === null) continue
+
+      // Find paper-side context via the order. When orderId maps to a known
+      // real_order, we inherit decisionId + conditionId + question from it.
+      let decisionId = 'orphan-' + tradeId
+      let realOrderId = orderId ?? tradeId
+      let conditionId = asString(t['market']) ?? ''
+      const question = ''
+      let resolvedSide: 'bid' | 'ask' = side === 'sell' ? 'ask' : 'bid'
+
+      if (orderId) {
+        const parentOrder = await this.orderRepo.findByPaperId(orderId).catch(() => null)
+        const fallback = parentOrder ?? (await this.findOrderById(orderId))
+        if (fallback) {
+          decisionId = fallback.decisionId
+          realOrderId = fallback.id
+          conditionId = fallback.conditionId
+          resolvedSide = fallback.side
+        }
+      }
+
+      try {
+        await this.fillRepo.insert({
+          id: `recon-${tradeId}`,
+          decisionId,
+          paperFillId: null,
+          realOrderId,
+          conditionId,
+          question,
+          side: resolvedSide,
+          fillPrice: price,
+          size,
+          hedgePrice: price,
+          realisedPnlUsd: 0,
+          makerFeeUsd: 0,
+          takerFeeUsd: 0,
+          filledAt: filledAt > 1e12 ? filledAt : filledAt * 1000,
+          hedgeOrderId: null,
+          hedgeStatus: 'skipped',
+          txHash: asString(t['transaction_hash']) ?? null,
+          clobTradeId: tradeId,
+          source: 'reconciler',
+        })
+        this.totalFillsIngested++
+        // Ensure the associated order carries a discrepancy marker since paper
+        // never emitted the fill. Best-effort — if no matching order, move on.
+        if (orderId) {
+          const parentOrder = await this.findOrderById(orderId)
+          if (parentOrder && parentOrder.discrepancy === null) {
+            await this.orderRepo.patchReconcile(parentOrder.id, {
+              discrepancy: `reconciler-sourced fill ${tradeId}`,
+              lastReconciledAt: Date.now(),
+            })
+            this.totalDiscrepancies++
+          }
+        }
+        // Token context is recorded in logs only — schema already has tokenId
+        // on real_orders, not on real_fills (fills inherit via the join).
+        if (tokenId) {
+          this.logger.debug(`orphan trade ${tradeId} token=${tokenId}`)
+        }
+      } catch (err) {
+        this.totalErrors++
+        this.logger.warn(
+          `insert orphan trade ${tradeId} failed: ${err instanceof Error ? err.message : String(err)}`,
+        )
+      }
+    }
+  }
+
+  private async findOrderById(orderId: string): Promise<RealOrderRow | null> {
+    // readOpen is already indexed; fall back to paperOrder lookup for covered
+    // cases, then give up. We intentionally don't add a generic findById repo
+    // method here — the reconciler is the only caller that needs it.
+    const open = await this.orderRepo.readOpen()
+    const hit = open.find((o) => o.id === orderId)
+    if (hit) return hit
+    return this.orderRepo.findByPaperId(orderId)
+  }
+
+  private parseClobOrder(raw: Record<string, unknown>): ClobOrderView {
+    const matchedSize =
+      asNumber(raw['size_matched']) ??
+      asNumber(raw['filled_size']) ??
+      asNumber(raw['matched']) ??
+      0
+    const status = (asString(raw['status']) ?? '').toUpperCase()
+    const avgPrice =
+      asNumber(raw['average_price']) ??
+      asNumber(raw['avg_price']) ??
+      asNumber(raw['price']) ??
+      null
+    return { matchedSize, status, avgPrice }
+  }
+
+  private async applyOrderPatch(row: RealOrderRow, view: ClobOrderView): Promise<void> {
+    const now = Date.now()
+    let nextStatus = row.status
+    let discrepancy: string | null = row.discrepancy
+
+    // CLOB matched more than we ever posted — either CLOB mis-reported or two
+    // orders share an id. Either way, flag it and let status follow the data.
+    if (view.matchedSize > row.size + SIZE_EPSILON) {
+      discrepancy = `matched ${view.matchedSize.toFixed(4)} > size ${row.size.toFixed(4)}`
+    }
+
+    if (view.matchedSize >= row.size - SIZE_EPSILON) {
+      nextStatus = 'filled'
+    } else if (view.matchedSize > SIZE_EPSILON) {
+      nextStatus = 'partial'
+    } else if (view.status === 'CANCELLED' || view.status === 'CANCELED') {
+      nextStatus = 'cancelled'
+    } else if (view.status === 'LIVE' || view.status === 'OPEN') {
+      // Stay in current status. Don't flip accepted→resting artificially.
+    }
+
+    // Paper already cancelled but CLOB came back with a filled order — this
+    // is the late-fill-after-drift-cancel case. Flag it so a human can check.
+    if (row.status === 'cancelled' && nextStatus === 'filled') {
+      discrepancy = discrepancy ?? 'late fill after paper cancel'
+    }
+
+    // Price divergence check — only once we actually have some fill to compare
+    // against. Skip pre-fill rows since avg_price is noise there.
+    if (
+      view.matchedSize > SIZE_EPSILON &&
+      view.avgPrice !== null &&
+      Math.abs(view.avgPrice - row.price) > PRICE_DIV_THRESHOLD
+    ) {
+      const delta = (view.avgPrice - row.price).toFixed(4)
+      discrepancy = discrepancy ?? `price div ${delta}`
+    }
+
+    const closedAt =
+      nextStatus === 'filled' || nextStatus === 'cancelled'
+        ? (row.closedAt ?? now)
+        : null
+
+    const discrepancyChanged = discrepancy !== row.discrepancy
+    if (discrepancyChanged && discrepancy !== null) {
+      this.totalDiscrepancies++
+      this.logger.warn(`order ${row.id}: ${discrepancy}`)
+    }
+
+    await this.orderRepo.patchReconcile(row.id, {
+      status: nextStatus,
+      filledSize: view.matchedSize,
+      closedAt,
+      discrepancy,
+      lastReconciledAt: now,
+    })
+  }
+}
+
+function asNumber(v: unknown): number | null {
+  if (typeof v === 'number' && Number.isFinite(v)) return v
+  if (typeof v === 'string' && v !== '') {
+    const n = Number(v)
+    return Number.isFinite(n) ? n : null
+  }
+  return null
+}
+
+function asString(v: unknown): string | null {
+  return typeof v === 'string' && v !== '' ? v : null
+}

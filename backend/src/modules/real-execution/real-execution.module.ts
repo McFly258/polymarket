@@ -10,6 +10,7 @@ import { RealFillRepo } from './real-fill.repo'
 import { RealOrderRepo } from './real-order.repo'
 import { RealPositionRepo } from './real-position.repo'
 import { RealStateRepo } from './real-state.repo'
+import { ReconciliationService } from './reconciliation.service'
 
 @Module({
   imports: [PrismaModule, PersistenceModule],
@@ -21,7 +22,15 @@ import { RealStateRepo } from './real-state.repo'
     RealStateRepo,
     ClobBroker,
     RealExecutionListener,
+    ReconciliationService,
   ],
-  exports: [ClobBroker, RealStateRepo, RealOrderRepo, RealFillRepo, RealPositionRepo],
+  exports: [
+    ClobBroker,
+    RealStateRepo,
+    RealOrderRepo,
+    RealFillRepo,
+    RealPositionRepo,
+    ReconciliationService,
+  ],
 })
 export class RealExecutionModule {}

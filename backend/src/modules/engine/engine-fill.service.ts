@@ -183,6 +183,7 @@ export class EngineFillService {
       hedgeExpectedPrice: orderPrice,
       hedgeFillPrice: hedgePrice,
       tokenId: pos.tokenId,
+      isPassiveHedge,
     } satisfies OrderFilledEvent)
 
     s.inventoryBias.set(pos.conditionId, {

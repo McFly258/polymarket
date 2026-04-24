@@ -2,12 +2,17 @@ import { Injectable } from '@nestjs/common'
 
 import { PrismaService } from '../prisma/prisma.service'
 
-export type HedgeStatus = 'pending' | 'done' | 'failed'
+export type HedgeStatus = 'pending' | 'done' | 'failed' | 'skipped'
+
+// 'paper'     — fill inserted synchronously from an ORDER_FILLED engine event.
+// 'reconciler' — fill inserted by the reconciliation poller after seeing a CLOB
+//                trade with no matching paper fill (late / divergent execution).
+export type RealFillSource = 'paper' | 'reconciler'
 
 export interface RealFillRow {
   id: string
   decisionId: string
-  paperFillId: string
+  paperFillId: string | null
   realOrderId: string
   conditionId: string
   question: string
@@ -22,6 +27,8 @@ export interface RealFillRow {
   hedgeOrderId: string | null
   hedgeStatus: HedgeStatus
   txHash: string | null
+  clobTradeId: string | null
+  source: RealFillSource
 }
 
 @Injectable()
@@ -49,13 +56,21 @@ export class RealFillRepo {
         hedgeOrderId: f.hedgeOrderId,
         hedgeStatus: f.hedgeStatus,
         txHash: f.txHash,
+        clobTradeId: f.clobTradeId,
+        source: f.source,
       },
       update: {
         hedgeOrderId: f.hedgeOrderId,
         hedgeStatus: f.hedgeStatus,
         txHash: f.txHash,
+        clobTradeId: f.clobTradeId,
       },
     })
+  }
+
+  async findByClobTradeId(clobTradeId: string): Promise<RealFillRow | null> {
+    const r = await this.prisma.realFill.findUnique({ where: { clobTradeId } })
+    return r ? this.toRow(r) : null
   }
 
   async updateHedge(
@@ -88,7 +103,7 @@ export class RealFillRepo {
   private toRow(r: {
     id: string
     decisionId: string
-    paperFillId: string
+    paperFillId: string | null
     realOrderId: string
     conditionId: string
     question: string
@@ -103,6 +118,8 @@ export class RealFillRepo {
     hedgeOrderId: string | null
     hedgeStatus: string
     txHash: string | null
+    clobTradeId: string | null
+    source: string
   }): RealFillRow {
     return {
       id: r.id,
@@ -122,6 +139,8 @@ export class RealFillRepo {
       hedgeOrderId: r.hedgeOrderId,
       hedgeStatus: r.hedgeStatus as HedgeStatus,
       txHash: r.txHash,
+      clobTradeId: r.clobTradeId,
+      source: r.source as RealFillSource,
     }
   }
 }

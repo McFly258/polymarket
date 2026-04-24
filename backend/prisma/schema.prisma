@@ -128,31 +128,39 @@ model CapitalSample {
 }
 
 model RealOrder {
-  id           String    @id
-  decisionId   String    @map("decision_id")
-  paperOrderId String    @map("paper_order_id")
-  conditionId  String    @map("condition_id")
-  tokenId      String    @map("token_id")
-  outcome      String
-  side         String
-  price        Float
-  size         Float
-  status       String
-  rejectReason String?   @map("reject_reason")
-  postedAt     DateTime  @map("posted_at")
-  closedAt     DateTime? @map("closed_at")
-  txHash       String?   @map("tx_hash")
+  id               String    @id
+  decisionId       String    @map("decision_id")
+  paperOrderId     String    @map("paper_order_id")
+  conditionId      String    @map("condition_id")
+  tokenId          String    @map("token_id")
+  outcome          String
+  side             String
+  price            Float
+  size             Float
+  // Cumulative qty the CLOB has actually matched. Reconciler increases this
+  // as partial fills land; status transitions accepted → partial → filled.
+  filledSize       Float     @default(0) @map("filled_size")
+  status           String
+  rejectReason     String?   @map("reject_reason")
+  postedAt         DateTime  @map("posted_at")
+  closedAt         DateTime? @map("closed_at")
+  txHash           String?   @map("tx_hash")
+  lastReconciledAt DateTime? @map("last_reconciled_at")
+  // When reconciler finds unexpected state (late fill after paper cancel, price
+  // divergence past threshold, etc.) we record a short string here for triage.
+  discrepancy      String?
 
   @@index([status])
   @@index([decisionId])
   @@index([paperOrderId])
+  @@index([lastReconciledAt])
   @@map("real_orders")
 }
 
 model RealFill {
   id             String   @id
   decisionId     String   @map("decision_id")
-  paperFillId    String   @map("paper_fill_id")
+  paperFillId    String?  @map("paper_fill_id")
   realOrderId    String   @map("real_order_id")
   conditionId    String   @map("condition_id")
   question       String
@@ -167,10 +175,17 @@ model RealFill {
   hedgeOrderId   String?  @map("hedge_order_id")
   hedgeStatus    String   @map("hedge_status")
   txHash         String?  @map("tx_hash")
+  // CLOB-side trade identifier — dedup key so reconciler re-runs never double
+  // insert a fill. Null on fills created from paper events (no CLOB trade yet).
+  clobTradeId    String?  @unique @map("clob_trade_id")
+  // 'paper' = inserted from ORDER_FILLED event, 'reconciler' = inserted by the
+  // reconciliation poller after seeing a CLOB trade not matched to a paper fill.
+  source         String   @default("paper")
 
   @@index([filledAt(sort: Desc)])
   @@index([decisionId])
   @@index([paperFillId])
+  @@index([realOrderId])
   @@map("real_fills")
 }
 

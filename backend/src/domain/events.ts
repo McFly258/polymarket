@@ -30,6 +30,10 @@ export interface OrderFilledEvent {
   hedgeExpectedPrice: number
   hedgeFillPrice: number
   tokenId: string
+  // Paper decided the fill was un-hedgeable (slip > cap). The real side must
+  // not dispatch a market hedge here — mirroring the paper "passive hedge" path
+  // keeps the two sides comparable and avoids unbounded market-order slippage.
+  isPassiveHedge: boolean
 }
 
 export function newDecisionId(): string {

@@ -3,7 +3,12 @@ import { Controller, Get, Post, Logger } from '@nestjs/common'
 import { FillRepo } from '../persistence/fill.repo'
 
 import { RealFillRepo } from './real-fill.repo'
+import { RealOrderRepo } from './real-order.repo'
 import { RealStateRepo } from './real-state.repo'
+import {
+  ReconciliationService,
+  type ReconciliationStatus,
+} from './reconciliation.service'
 
 export interface RealStatusDto {
   enabled: boolean
@@ -33,6 +38,8 @@ export class RealExecutionController {
   constructor(
     private readonly stateRepo: RealStateRepo,
     private readonly realFillRepo: RealFillRepo,
+    private readonly realOrderRepo: RealOrderRepo,
+    private readonly reconciler: ReconciliationService,
     private readonly fillRepo: FillRepo,
   ) {}
 
@@ -61,6 +68,35 @@ export class RealExecutionController {
     await this.stateRepo.write({ paused: false, pauseReason: null })
     this.logger.log('Real execution resumed via API')
     return { ok: true, message: 'Real execution resumed' }
+  }
+
+  @Get('admin/real/reconcile/status')
+  async reconcileStatus(): Promise<ReconciliationStatus> {
+    return this.reconciler.getStatus()
+  }
+
+  @Post('admin/real/reconcile/run')
+  async reconcileRun(): Promise<ReconciliationStatus> {
+    this.logger.log('Reconciler force-run requested via API')
+    return this.reconciler.runOnce()
+  }
+
+  @Get('admin/real/discrepancies')
+  async discrepancies(): Promise<{ count: number; orders: Array<Record<string, unknown>> }> {
+    const rows = await this.realOrderRepo.readOpen()
+    const flagged = rows.filter((r) => r.discrepancy !== null)
+    return {
+      count: flagged.length,
+      orders: flagged.map((r) => ({
+        id: r.id,
+        decisionId: r.decisionId,
+        status: r.status,
+        size: r.size,
+        filledSize: r.filledSize,
+        discrepancy: r.discrepancy,
+        lastReconciledAt: r.lastReconciledAt,
+      })),
+    }
   }
 
   @Get('compare')
