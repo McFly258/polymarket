@@ -2,16 +2,16 @@ import { Injectable } from '@nestjs/common'
 
 import { PrismaService } from '../prisma/prisma.service'
 
-export type FillSide = 'bid' | 'ask'
 export type HedgeStatus = 'pending' | 'done' | 'failed'
 
-export interface FillRow {
+export interface RealFillRow {
   id: string
-  decisionId: string | null
-  orderId: string
+  decisionId: string
+  paperFillId: string
+  realOrderId: string
   conditionId: string
   question: string
-  side: FillSide
+  side: 'bid' | 'ask'
   fillPrice: number
   size: number
   hedgePrice: number
@@ -21,19 +21,21 @@ export interface FillRow {
   filledAt: number
   hedgeOrderId: string | null
   hedgeStatus: HedgeStatus
+  txHash: string | null
 }
 
 @Injectable()
-export class FillRepo {
+export class RealFillRepo {
   constructor(private readonly prisma: PrismaService) {}
 
-  async insert(f: FillRow): Promise<void> {
-    await this.prisma.fill.upsert({
+  async insert(f: RealFillRow): Promise<void> {
+    await this.prisma.realFill.upsert({
       where: { id: f.id },
       create: {
         id: f.id,
         decisionId: f.decisionId,
-        orderId: f.orderId,
+        paperFillId: f.paperFillId,
+        realOrderId: f.realOrderId,
         conditionId: f.conditionId,
         question: f.question,
         side: f.side,
@@ -46,41 +48,48 @@ export class FillRepo {
         filledAt: new Date(f.filledAt),
         hedgeOrderId: f.hedgeOrderId,
         hedgeStatus: f.hedgeStatus,
+        txHash: f.txHash,
       },
       update: {
         hedgeOrderId: f.hedgeOrderId,
         hedgeStatus: f.hedgeStatus,
+        txHash: f.txHash,
       },
     })
   }
 
-  async updateHedge(id: string, hedgeOrderId: string | null, hedgeStatus: HedgeStatus): Promise<void> {
-    await this.prisma.fill.update({
+  async updateHedge(
+    id: string,
+    hedgeOrderId: string | null,
+    hedgeStatus: HedgeStatus,
+  ): Promise<void> {
+    await this.prisma.realFill.update({
       where: { id },
       data: { hedgeOrderId, hedgeStatus },
     })
   }
 
-  async readRecent(limit = 200): Promise<FillRow[]> {
-    const rows = await this.prisma.fill.findMany({
+  async readRecent(limit = 200): Promise<RealFillRow[]> {
+    const rows = await this.prisma.realFill.findMany({
       orderBy: { filledAt: 'desc' },
       take: limit,
     })
-    return rows.map(this.toRow)
+    return rows.map((r) => this.toRow(r))
   }
 
-  async readAll(limit = 10_000): Promise<FillRow[]> {
-    const rows = await this.prisma.fill.findMany({
+  async readAll(limit = 10_000): Promise<RealFillRow[]> {
+    const rows = await this.prisma.realFill.findMany({
       orderBy: { filledAt: 'asc' },
       take: limit,
     })
-    return rows.map(this.toRow)
+    return rows.map((r) => this.toRow(r))
   }
 
   private toRow(r: {
     id: string
-    decisionId: string | null
-    orderId: string
+    decisionId: string
+    paperFillId: string
+    realOrderId: string
     conditionId: string
     question: string
     side: string
@@ -93,14 +102,16 @@ export class FillRepo {
     filledAt: Date
     hedgeOrderId: string | null
     hedgeStatus: string
-  }): FillRow {
+    txHash: string | null
+  }): RealFillRow {
     return {
       id: r.id,
       decisionId: r.decisionId,
-      orderId: r.orderId,
+      paperFillId: r.paperFillId,
+      realOrderId: r.realOrderId,
       conditionId: r.conditionId,
       question: r.question,
-      side: r.side as FillSide,
+      side: r.side as 'bid' | 'ask',
       fillPrice: r.fillPrice,
       size: r.size,
       hedgePrice: r.hedgePrice,
@@ -110,6 +121,7 @@ export class FillRepo {
       filledAt: r.filledAt.getTime(),
       hedgeOrderId: r.hedgeOrderId,
       hedgeStatus: r.hedgeStatus as HedgeStatus,
+      txHash: r.txHash,
     }
   }
 }

@@ -2,9 +2,8 @@ import { Inject, Injectable, Logger, OnApplicationShutdown, OnModuleInit, forwar
 
 import { BROKER_TOKEN, type Broker } from '../../domain/broker.types'
 import { CAPITAL_SAMPLE_MS, REALLOC_MS, REWARD_TICK_MS } from '../../domain/constants'
-import { DEFAULT_STRATEGY } from '../../domain/strategy'
 import type { StrategyConfig } from '../../domain/strategy.types'
-import { MarketWsService, type WsClient } from '../polymarket/market-ws.service'
+import { MarketWsService } from '../polymarket/market-ws.service'
 import { EngineStateRepo } from '../persistence/engine-state.repo'
 import { FillRepo } from '../persistence/fill.repo'
 import { OrderRepo } from '../persistence/order.repo'

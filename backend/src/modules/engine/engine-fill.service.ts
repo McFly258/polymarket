@@ -1,6 +1,8 @@
 import { Inject, Injectable, Logger, forwardRef } from '@nestjs/common'
+import { EventEmitter2 } from '@nestjs/event-emitter'
 
 import type { BookView } from '../../domain/book.types'
+import { ENGINE_EVENT, type OrderCancelledEvent, type OrderFilledEvent } from '../../domain/events'
 import { BROKER_TOKEN, type Broker } from '../../domain/broker.types'
 import {
   DRIFT_CANCEL_TICKS,
@@ -36,6 +38,7 @@ export class EngineFillService {
     private readonly fillRepo: FillRepo,
     private readonly positionRepo: PositionRepo,
     @Inject(forwardRef(() => EngineAllocService)) private readonly alloc: EngineAllocService,
+    private readonly events: EventEmitter2,
   ) {}
 
   evaluateBook(s: EngineRuntimeState, tokenId: string, view: BookView): void {
@@ -74,9 +77,17 @@ export class EngineFillService {
       const toCancel = [pos.bidOrderId, pos.askOrderId].filter((x): x is string => !!x)
       const now = Date.now()
       const cidToRepost = pos.conditionId
+      const decisionIdToCancel = pos.decisionId
       void Promise.all(toCancel.map((id) => this.broker.cancelOrder(id))).then(async () => {
         for (const id of toCancel) await this.orderRepo.updateStatus(id, 'cancelled', now)
         await this.positionRepo.delete(cidToRepost)
+        for (const id of toCancel) {
+          this.events.emit(ENGINE_EVENT.ORDER_CANCELLED, {
+            decisionId: decisionIdToCancel,
+            paperOrderId: id,
+            at: now,
+          } satisfies OrderCancelledEvent)
+        }
         setTimeout(() => {
           void this.alloc.repositionMarket(s, cidToRepost)
         }, REPOSITION_DELAY_MS)
@@ -128,8 +139,14 @@ export class EngineFillService {
       if (oppositeOrderId) {
         if (side === 'bid') pos.askOrderId = null
         else pos.bidOrderId = null
+        const cancelledAt = Date.now()
         void this.broker.cancelOrder(oppositeOrderId).then(async () => {
-          await this.orderRepo.updateStatus(oppositeOrderId, 'cancelled', Date.now())
+          await this.orderRepo.updateStatus(oppositeOrderId, 'cancelled', cancelledAt)
+          this.events.emit(ENGINE_EVENT.ORDER_CANCELLED, {
+            decisionId: pos.decisionId,
+            paperOrderId: oppositeOrderId,
+            at: cancelledAt,
+          } satisfies OrderCancelledEvent)
         })
       }
     }
@@ -142,6 +159,7 @@ export class EngineFillService {
 
     const fill: FillRow = {
       id: fillId,
+      decisionId: pos.decisionId,
       orderId,
       conditionId: pos.conditionId,
       question: pos.question,
@@ -158,6 +176,14 @@ export class EngineFillService {
     }
     await this.fillRepo.insert(fill)
     await this.positionRepo.upsert(positionRowFromInternal(pos, Date.now()))
+    this.events.emit(ENGINE_EVENT.ORDER_FILLED, {
+      decisionId: pos.decisionId,
+      paperFill: fill,
+      hedgeSide,
+      hedgeExpectedPrice: orderPrice,
+      hedgeFillPrice: hedgePrice,
+      tokenId: pos.tokenId,
+    } satisfies OrderFilledEvent)
 
     s.inventoryBias.set(pos.conditionId, {
       bias: side === 'bid' ? 'long' : 'short',

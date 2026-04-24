@@ -7,6 +7,7 @@ export type OrderStatus = 'resting' | 'filled' | 'cancelled'
 
 export interface OrderRow {
   id: string
+  decisionId: string | null
   conditionId: string
   tokenId: string
   outcome: string
@@ -29,6 +30,7 @@ export class OrderRepo {
       where: { id: o.id },
       create: {
         id: o.id,
+        decisionId: o.decisionId,
         conditionId: o.conditionId,
         tokenId: o.tokenId,
         outcome: o.outcome,
@@ -62,6 +64,7 @@ export class OrderRepo {
     })
     return rows.map((r) => ({
       id: r.id,
+      decisionId: r.decisionId,
       conditionId: r.conditionId,
       tokenId: r.tokenId,
       outcome: r.outcome,

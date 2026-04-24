@@ -1,5 +1,7 @@
 import { Inject, Injectable, Logger, forwardRef } from '@nestjs/common'
+import { EventEmitter2 } from '@nestjs/event-emitter'
 
+import { ENGINE_EVENT, newDecisionId, type OrderCancelledEvent, type OrderPlacedEvent } from '../../domain/events'
 import {
   INVENTORY_SKEW_TIGHT_TICKS,
   INVENTORY_SKEW_WIDE_TICKS,
@@ -45,6 +47,7 @@ export class EngineAllocService {
     private readonly fillRepo: FillRepo,
     private readonly positionRepo: PositionRepo,
     private readonly stateRepo: EngineStateRepo,
+    private readonly events: EventEmitter2,
   ) {}
 
   async reallocate(s: EngineRuntimeState): Promise<void> {
@@ -252,9 +255,11 @@ export class EngineAllocService {
       this.broker.placeOrder(askReq),
     ])
     const now = Date.now()
+    const decisionId = newDecisionId()
 
     const bidOrder: OrderRow = {
       id: bidRes.id,
+      decisionId,
       conditionId: alloc.conditionId,
       tokenId: yesBook.tokenId,
       outcome: yesBook.outcome,
@@ -269,6 +274,7 @@ export class EngineAllocService {
     }
     const askOrder: OrderRow = {
       id: askRes.id,
+      decisionId,
       conditionId: alloc.conditionId,
       tokenId: yesBook.tokenId,
       outcome: yesBook.outcome,
@@ -283,12 +289,15 @@ export class EngineAllocService {
     }
     await this.orderRepo.insert(bidOrder)
     await this.orderRepo.insert(askOrder)
+    this.events.emit(ENGINE_EVENT.ORDER_PLACED, { decisionId, paperOrder: bidOrder } satisfies OrderPlacedEvent)
+    this.events.emit(ENGINE_EVENT.ORDER_PLACED, { decisionId, paperOrder: askOrder } satisfies OrderPlacedEvent)
 
     const pos: InternalPosition = {
       conditionId: alloc.conditionId,
       question: alloc.question,
       tokenId: yesBook.tokenId,
       outcome: yesBook.outcome,
+      decisionId,
       bidOrderId: bidRes.id,
       askOrderId: askRes.id,
       bidPrice: alloc.bidPrice,
@@ -320,6 +329,13 @@ export class EngineAllocService {
     const toCancel = [pos.bidOrderId, pos.askOrderId].filter((x): x is string => !!x)
     await Promise.all(toCancel.map((id) => this.broker.cancelOrder(id)))
     for (const id of toCancel) await this.orderRepo.updateStatus(id, 'cancelled', now)
+    for (const id of toCancel) {
+      this.events.emit(ENGINE_EVENT.ORDER_CANCELLED, {
+        decisionId: pos.decisionId,
+        paperOrderId: id,
+        at: now,
+      } satisfies OrderCancelledEvent)
+    }
     s.positions.delete(conditionId)
     await this.positionRepo.delete(conditionId)
   }

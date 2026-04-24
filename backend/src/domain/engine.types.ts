@@ -7,6 +7,7 @@ export interface InternalPosition {
   question: string
   tokenId: string
   outcome: string
+  decisionId: string | null
   bidOrderId: string | null
   askOrderId: string | null
   bidPrice: number

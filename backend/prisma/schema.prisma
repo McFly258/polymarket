@@ -1,9 +1,3 @@
-// Prisma schema — Postgres target.
-//
-// Mirrors the SQLite `paper_*` tables from the legacy sim/db.ts, translated
-// into typed Prisma models. No feature parity gaps; names kept close to the
-// original so porting logic stays mechanical.
-
 generator client {
   provider = "prisma-client-js"
 }
@@ -13,65 +7,66 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-// Singleton — one row, `id = 1`. Tracks engine lifecycle so the server can
-// auto-resume a crashed run.
 model EngineState {
-  id           Int       @id @default(1)
-  state        String    // 'idle' | 'running' | 'stopping'
-  startedAt    DateTime? @map("started_at")
-  configJson   Json?     @map("config_json")
-  lastAllocAt  DateTime? @map("last_alloc_at")
-  updatedAt    DateTime  @updatedAt @map("updated_at")
+  id          Int       @id @default(1)
+  state       String
+  startedAt   DateTime? @map("started_at")
+  configJson  Json?     @map("config_json")
+  lastAllocAt DateTime? @map("last_alloc_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
 
   @@map("engine_state")
 }
 
-// Singleton — one row, `id = 1`. Aggregate reward accrual counters.
 model Reward {
-  id              Int      @id @default(1)
-  totalEarnedUsd  Float    @map("total_earned_usd")
-  lastRatePerDay  Float    @map("last_rate_per_day")
-  lastUpdatedAt   DateTime @map("last_updated_at")
+  id             Int      @id @default(1)
+  totalEarnedUsd Float    @map("total_earned_usd")
+  lastRatePerDay Float    @map("last_rate_per_day")
+  lastUpdatedAt  DateTime @map("last_updated_at")
 
   @@map("reward")
 }
 
 model Order {
-  id             String    @id
-  conditionId    String    @map("condition_id")
-  tokenId        String    @map("token_id")
-  outcome        String
-  side           String    // 'bid' | 'ask'
-  price          Float
-  size           Float
-  status         String    // 'resting' | 'filled' | 'cancelled'
-  postedAt       DateTime  @map("posted_at")
-  postedBestBid  Float?    @map("posted_best_bid")
-  postedBestAsk  Float?    @map("posted_best_ask")
-  closedAt       DateTime? @map("closed_at")
+  id            String    @id
+  conditionId   String    @map("condition_id")
+  tokenId       String    @map("token_id")
+  outcome       String
+  side          String
+  price         Float
+  size          Float
+  status        String
+  postedAt      DateTime  @map("posted_at")
+  postedBestBid Float?    @map("posted_best_bid")
+  postedBestAsk Float?    @map("posted_best_ask")
+  closedAt      DateTime? @map("closed_at")
+  decisionId    String?   @map("decision_id")
 
   @@index([status])
   @@index([tokenId])
+  @@index([decisionId])
   @@map("orders")
 }
 
 model Fill {
-  id              String   @id
-  orderId         String   @map("order_id")
-  conditionId     String   @map("condition_id")
-  question        String
-  side            String   // 'bid' | 'ask'
-  fillPrice       Float    @map("fill_price")
-  size            Float
-  hedgePrice      Float    @map("hedge_price")
-  realisedPnlUsd  Float    @map("realised_pnl_usd")
-  makerFeeUsd     Float    @map("maker_fee_usd")
-  takerFeeUsd     Float    @map("taker_fee_usd")
-  filledAt        DateTime @map("filled_at")
-  hedgeOrderId    String?  @map("hedge_order_id")
-  hedgeStatus     String   @map("hedge_status") // 'pending' | 'done' | 'failed'
+  id             String   @id
+  orderId        String   @map("order_id")
+  conditionId    String   @map("condition_id")
+  question       String
+  side           String
+  fillPrice      Float    @map("fill_price")
+  size           Float
+  hedgePrice     Float    @map("hedge_price")
+  realisedPnlUsd Float    @map("realised_pnl_usd")
+  makerFeeUsd    Float    @map("maker_fee_usd")
+  takerFeeUsd    Float    @map("taker_fee_usd")
+  filledAt       DateTime @map("filled_at")
+  hedgeOrderId   String?  @map("hedge_order_id")
+  hedgeStatus    String   @map("hedge_status")
+  decisionId     String?  @map("decision_id")
 
   @@index([filledAt(sort: Desc)])
+  @@index([decisionId])
   @@map("fills")
 }
 
@@ -99,39 +94,129 @@ model Position {
   @@map("positions")
 }
 
-// Hourly total-reward snapshots — one row per hour, keyed by epoch ms of the
-// hour boundary. Used by the frontend reward history chart.
 model RewardHourly {
-  hourEpoch        BigInt   @id @map("hour_epoch")
-  snapshotAt       DateTime @map("snapshot_at")
-  totalEarnedUsd   Float    @map("total_earned_usd")
-  ratePerDay       Float    @map("rate_per_day")
-  totalCapitalUsd  Float    @default(0) @map("total_capital_usd")
+  hourEpoch       BigInt   @id @map("hour_epoch")
+  snapshotAt      DateTime @map("snapshot_at")
+  totalEarnedUsd  Float    @map("total_earned_usd")
+  ratePerDay      Float    @map("rate_per_day")
+  totalCapitalUsd Float    @default(0) @map("total_capital_usd")
 
   @@map("reward_hourly")
 }
 
-// Per-position hourly snapshot. Multiple rows per hour (one per position).
 model PositionRewardHourly {
-  id                  Int      @id @default(autoincrement())
-  hourEpoch           BigInt   @map("hour_epoch")
-  snapshotAt          DateTime @map("snapshot_at")
-  conditionId         String   @map("condition_id")
-  question            String
-  rewardSharePct      Float    @map("reward_share_pct")
-  expectedRatePerDay  Float    @map("expected_rate_per_day")
-  earnedThisHourUsd   Float    @map("earned_this_hour_usd")
+  id                 Int      @id @default(autoincrement())
+  hourEpoch          BigInt   @map("hour_epoch")
+  snapshotAt         DateTime @map("snapshot_at")
+  conditionId        String   @map("condition_id")
+  question           String
+  rewardSharePct     Float    @map("reward_share_pct")
+  expectedRatePerDay Float    @map("expected_rate_per_day")
+  earnedThisHourUsd  Float    @map("earned_this_hour_usd")
 
   @@index([hourEpoch(sort: Desc)])
   @@index([conditionId, hourEpoch(sort: Desc)])
   @@map("position_reward_hourly")
 }
 
-// Total deployed capital sampled every 5 min, aligned to the 5-min grid.
 model CapitalSample {
-  bucketEpoch      BigInt   @id @map("bucket_epoch")
-  sampledAt        DateTime @map("sampled_at")
-  totalCapitalUsd  Float    @map("total_capital_usd")
+  bucketEpoch     BigInt   @id @map("bucket_epoch")
+  sampledAt       DateTime @map("sampled_at")
+  totalCapitalUsd Float    @map("total_capital_usd")
 
   @@map("capital_5min")
+}
+
+model RealOrder {
+  id           String    @id
+  decisionId   String    @map("decision_id")
+  paperOrderId String    @map("paper_order_id")
+  conditionId  String    @map("condition_id")
+  tokenId      String    @map("token_id")
+  outcome      String
+  side         String
+  price        Float
+  size         Float
+  status       String
+  rejectReason String?   @map("reject_reason")
+  postedAt     DateTime  @map("posted_at")
+  closedAt     DateTime? @map("closed_at")
+  txHash       String?   @map("tx_hash")
+
+  @@index([status])
+  @@index([decisionId])
+  @@index([paperOrderId])
+  @@map("real_orders")
+}
+
+model RealFill {
+  id             String   @id
+  decisionId     String   @map("decision_id")
+  paperFillId    String   @map("paper_fill_id")
+  realOrderId    String   @map("real_order_id")
+  conditionId    String   @map("condition_id")
+  question       String
+  side           String
+  fillPrice      Float    @map("fill_price")
+  size           Float
+  hedgePrice     Float    @map("hedge_price")
+  realisedPnlUsd Float    @map("realised_pnl_usd")
+  makerFeeUsd    Float    @map("maker_fee_usd")
+  takerFeeUsd    Float    @map("taker_fee_usd")
+  filledAt       DateTime @map("filled_at")
+  hedgeOrderId   String?  @map("hedge_order_id")
+  hedgeStatus    String   @map("hedge_status")
+  txHash         String?  @map("tx_hash")
+
+  @@index([filledAt(sort: Desc)])
+  @@index([decisionId])
+  @@index([paperFillId])
+  @@map("real_fills")
+}
+
+model RealPosition {
+  conditionId String   @id @map("condition_id")
+  decisionId  String?  @map("decision_id")
+  question    String
+  tokenId     String   @map("token_id")
+  outcome     String
+  bidOrderId  String?  @map("bid_order_id")
+  askOrderId  String?  @map("ask_order_id")
+  bidPrice    Float    @map("bid_price")
+  askPrice    Float    @map("ask_price")
+  bidSize     Float    @map("bid_size")
+  askSize     Float    @map("ask_size")
+  capitalUsd  Float    @default(0) @map("capital_usd")
+  updatedAt   DateTime @map("updated_at")
+
+  @@map("real_positions")
+}
+
+model RealReward {
+  id             Int      @id @default(1)
+  totalEarnedUsd Float    @map("total_earned_usd")
+  lastRatePerDay Float    @map("last_rate_per_day")
+  lastUpdatedAt  DateTime @map("last_updated_at")
+
+  @@map("real_reward")
+}
+
+model RealCapitalSample {
+  bucketEpoch     BigInt   @id @map("bucket_epoch")
+  sampledAt       DateTime @map("sampled_at")
+  totalCapitalUsd Float    @map("total_capital_usd")
+
+  @@map("real_capital_5min")
+}
+
+model RealExecutionState {
+  id              Int      @id @default(1)
+  enabled         Boolean  @default(false)
+  paused          Boolean  @default(false)
+  pauseReason     String?  @map("pause_reason")
+  dailyLossUsd    Float    @default(0) @map("daily_loss_usd")
+  dailyLossDayUtc String?  @map("daily_loss_day_utc")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  @@map("real_execution_state")
 }
