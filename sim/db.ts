@@ -17,6 +17,7 @@ export function getDb(): Database.Database {
   if (_db) return _db
   _db = new Database(DB_PATH)
   _db.pragma('journal_mode = WAL')
+  _db.pragma('busy_timeout = 10000')
   _db.pragma('foreign_keys = ON')
   initSchema(_db)
   return _db
