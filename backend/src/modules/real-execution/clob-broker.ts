@@ -1,5 +1,8 @@
-import { createHmac } from 'node:crypto'
-import { Injectable, Logger } from '@nestjs/common'
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common'
+import { ClobClient, Chain, OrderType, Side } from '@polymarket/clob-client'
+import { createWalletClient, http } from 'viem'
+import { privateKeyToAccount } from 'viem/accounts'
+import { polygon } from 'viem/chains'
 
 import type {
   OrderCancelledEvent,
@@ -30,36 +33,14 @@ function envNum(key: string, fallback: number): number {
   return v !== undefined && v !== '' ? Number(v) : fallback
 }
 
-type L2Headers = Record<string, string>
-
-function buildL2Headers(
-  method: string,
-  path: string,
-  body: string,
-  walletAddress: string,
-  secret: string,
-  passphrase: string,
-): L2Headers {
-  const timestamp = Math.floor(Date.now() / 1000)
-  const msg = `${timestamp}${method}${path}${body}`
-  const signature = createHmac('sha256', secret).update(msg).digest('hex')
-  return {
-    POLY_ADDRESS: walletAddress,
-    POLY_SIGNATURE: signature,
-    POLY_TIMESTAMP: timestamp.toString(),
-    POLY_NONCE: '0',
-    POLY_PASSPHRASE: passphrase,
-    'Content-Type': 'application/json',
-  }
-}
-
 // ClobBroker — real-execution bridge driven by post-persist engine events.
 // All methods are no-ops unless ENABLE_REAL_EXECUTION=true AND state.paused=false.
 // Every call persists to the real_* tables, so paper↔real joins via decisionId
 // work even when dispatch is disabled (real rows are recorded as 'skipped').
 @Injectable()
-export class ClobBroker {
+export class ClobBroker implements OnModuleInit {
   private readonly logger = new Logger(ClobBroker.name)
+  private _client: ClobClient | null = null
 
   constructor(
     private readonly orderRepo: RealOrderRepo,
@@ -67,17 +48,32 @@ export class ClobBroker {
     private readonly stateRepo: RealStateRepo,
   ) {}
 
-  private get walletAddress(): string {
-    return env('CLOB_WALLET_ADDRESS', 'your-wallet-address-here')
+  onModuleInit(): void {
+    if (!this.isRealEnabled()) return
+    const missing: string[] = []
+    if (!this.walletPrivateKey) missing.push('CLOB_WALLET_PRIVATE_KEY')
+    if (!this.apiKey) missing.push('CLOB_API_KEY')
+    if (!this.apiSecret) missing.push('CLOB_API_SECRET')
+    if (!this.apiPassphrase) missing.push('CLOB_API_PASSPHRASE')
+    if (missing.length > 0) {
+      throw new Error(
+        `ENABLE_REAL_EXECUTION=true but required env vars are missing: ${missing.join(', ')}`,
+      )
+    }
+    this.logger.log('Real execution enabled — credentials verified at startup')
+  }
+
+  private get walletPrivateKey(): string {
+    return env('CLOB_WALLET_PRIVATE_KEY', '')
   }
   private get apiKey(): string {
-    return env('CLOB_API_KEY', 'your-api-key-here')
+    return env('CLOB_API_KEY', '')
   }
   private get apiSecret(): string {
-    return env('CLOB_API_SECRET', 'your-api-secret-here')
+    return env('CLOB_API_SECRET', '')
   }
   private get apiPassphrase(): string {
-    return env('CLOB_API_PASSPHRASE', 'your-passphrase-here')
+    return env('CLOB_API_PASSPHRASE', '')
   }
   private get maxDailyLoss(): number {
     return envNum('REAL_MAX_DAILY_LOSS_USD', 100)
@@ -92,6 +88,32 @@ export class ClobBroker {
 
   private todayUtc(): string {
     return new Date().toISOString().slice(0, 10)
+  }
+
+  // Lazily constructs the SDK client on first dispatch. Throws if private key
+  // is missing — caller is responsible for only calling this when dispatch is
+  // allowed (i.e. isRealEnabled() === true).
+  private getClient(): ClobClient {
+    if (this._client) return this._client
+    const pk = this.walletPrivateKey
+    if (!pk) {
+      throw new Error(
+        'CLOB_WALLET_PRIVATE_KEY is required when ENABLE_REAL_EXECUTION=true',
+      )
+    }
+    const account = privateKeyToAccount(pk as `0x${string}`)
+    const walletClient = createWalletClient({
+      account,
+      chain: polygon,
+      transport: http(),
+    })
+    this._client = new ClobClient(
+      CLOB_BASE,
+      Chain.POLYGON,
+      walletClient,
+      { key: this.apiKey, secret: this.apiSecret, passphrase: this.apiPassphrase },
+    )
+    return this._client
   }
 
   private async dispatchAllowed(): Promise<boolean> {
@@ -119,83 +141,33 @@ export class ClobBroker {
     await this.stateRepo.write({ dailyLossUsd: dailyLoss, dailyLossDayUtc: today })
   }
 
-  private async clobPost(path: string, payload: unknown): Promise<Record<string, unknown>> {
-    const body = JSON.stringify(payload)
-    const headers = buildL2Headers(
-      'POST',
-      path,
-      body,
-      this.walletAddress,
-      this.apiSecret,
-      this.apiPassphrase,
-    )
-    const res = await fetch(`${CLOB_BASE}${path}`, { method: 'POST', headers, body })
-    if (!res.ok) {
-      const text = await res.text()
-      throw new Error(`CLOB POST ${path} → ${res.status}: ${text}`)
-    }
-    return (await res.json()) as Record<string, unknown>
-  }
-
-  private async clobDelete(path: string, payload: unknown): Promise<Record<string, unknown>> {
-    const body = JSON.stringify(payload)
-    const headers = buildL2Headers(
-      'DELETE',
-      path,
-      body,
-      this.walletAddress,
-      this.apiSecret,
-      this.apiPassphrase,
-    )
-    const res = await fetch(`${CLOB_BASE}${path}`, { method: 'DELETE', headers, body })
-    if (!res.ok) {
-      const text = await res.text()
-      throw new Error(`CLOB DELETE ${path} → ${res.status}: ${text}`)
-    }
-    return (await res.json()) as Record<string, unknown>
-  }
-
-  // Public GET helpers exposed for the reconciler. Return raw JSON; caller
-  // decodes the specific shape. Signed with L2 headers (GET has empty body).
+  // Public GET helpers exposed for the reconciler. Only called when real
+  // execution is enabled (reconciler short-circuits otherwise).
   async fetchOrder(orderId: string): Promise<Record<string, unknown>> {
-    const path = `/order/${orderId}`
-    const headers = buildL2Headers(
-      'GET',
-      path,
-      '',
-      this.walletAddress,
-      this.apiSecret,
-      this.apiPassphrase,
-    )
-    const res = await fetch(`${CLOB_BASE}${path}`, { method: 'GET', headers })
-    if (!res.ok) {
-      const text = await res.text()
-      throw new Error(`CLOB GET ${path} → ${res.status}: ${text}`)
-    }
-    return (await res.json()) as Record<string, unknown>
+    const order = await this.getClient().getOrder(orderId)
+    return order as unknown as Record<string, unknown>
   }
 
   async fetchTrades(sinceMs: number): Promise<Array<Record<string, unknown>>> {
-    const path = `/trades?maker=${this.walletAddress}&after=${Math.floor(sinceMs / 1000)}`
-    const headers = buildL2Headers(
-      'GET',
-      path,
-      '',
-      this.walletAddress,
-      this.apiSecret,
-      this.apiPassphrase,
-    )
-    const res = await fetch(`${CLOB_BASE}${path}`, { method: 'GET', headers })
-    if (!res.ok) {
-      const text = await res.text()
-      throw new Error(`CLOB GET ${path} → ${res.status}: ${text}`)
-    }
-    const body = (await res.json()) as unknown
-    if (Array.isArray(body)) return body as Array<Record<string, unknown>>
-    if (body && typeof body === 'object' && Array.isArray((body as { data?: unknown }).data)) {
-      return (body as { data: Array<Record<string, unknown>> }).data
-    }
-    return []
+    const client = this.getClient()
+    // We pass a viem WalletClient which has no getAddress(); derive address from
+    // the private key directly — same key used to create the client.
+    const pk = this.walletPrivateKey
+    const makerAddress = pk ? privateKeyToAccount(pk as `0x${string}`).address : undefined
+    const trades = await client.getTrades({
+      maker_address: makerAddress,
+      after: Math.floor(sinceMs / 1000).toString(),
+    })
+    // Normalize SDK Trade shape → reconciler-compatible shape.
+    // SDK uses match_time (ISO string) and maker_orders[]; reconciler expects
+    // timestamp (unix seconds), order_id, maker_order_id, token_id.
+    return trades.map((t) => ({
+      ...(t as unknown as Record<string, unknown>),
+      timestamp: Math.floor(new Date(t.match_time).getTime() / 1000),
+      token_id: t.asset_id,
+      order_id: t.maker_orders?.[0]?.order_id ?? null,
+      maker_order_id: t.maker_orders?.[0]?.order_id ?? null,
+    }))
   }
 
   isEnabled(): boolean {
@@ -218,17 +190,21 @@ export class ClobBroker {
       this.logger.warn(`onOrderPlaced rejected: ${rejectReason} (decision ${decisionId})`)
     } else if (dispatch) {
       try {
-        const resp = await this.clobPost('/order', {
-          tokenID: paperOrder.tokenId,
-          price: paperOrder.price,
-          side: paperOrder.side === 'bid' ? 'BUY' : 'SELL',
-          size: paperOrder.size,
-          type: 'LIMIT',
-          feeRateBps: '0',
-          expiration: '0',
-          nonce: '0',
-        })
-        clobOrderId = String(resp['orderID'] ?? resp['id'] ?? clobOrderId)
+        const resp = await this.getClient().createAndPostOrder(
+          {
+            tokenID: paperOrder.tokenId,
+            price: paperOrder.price,
+            size: paperOrder.size,
+            side: paperOrder.side === 'bid' ? Side.BUY : Side.SELL,
+          },
+          undefined,
+          OrderType.GTC,
+        )
+        clobOrderId = String(
+          (resp as Record<string, unknown>)['orderID'] ??
+          (resp as Record<string, unknown>)['id'] ??
+          clobOrderId,
+        )
         status = 'accepted'
         this.logger.log(`CLOB order placed: ${clobOrderId} (decision ${decisionId})`)
       } catch (err) {
@@ -271,7 +247,7 @@ export class ClobBroker {
     }
 
     try {
-      await this.clobDelete('/order', { orderID: real.id })
+      await this.getClient().cancelOrder({ orderID: real.id })
       await this.orderRepo.updateStatusByPaperId(paperOrderId, 'cancelled', at)
       this.logger.log(`CLOB order cancelled: ${real.id}`)
     } catch (err) {
@@ -320,25 +296,32 @@ export class ClobBroker {
         )
       } else {
         try {
-          const resp = await this.clobPost('/order', {
-            tokenID: tokenId,
-            price: hedgeFillPrice,
-            side: hedgeSide === 'buy' ? 'BUY' : 'SELL',
-            size: paperFill.size,
-            type: 'MARKET',
-            feeRateBps: '0',
-            expiration: '0',
-            nonce: '0',
-          })
-          hedgeOrderId = String(resp['orderID'] ?? resp['id'] ?? realFillId)
-          if (typeof resp['price'] === 'number') {
-            actualHedgePrice = resp['price'] as number
-          } else if (typeof resp['avgPrice'] === 'number') {
-            actualHedgePrice = resp['avgPrice'] as number
+          // SDK semantics: BUY amount = USDC to spend; SELL amount = shares to sell.
+          const hedgeSideEnum = hedgeSide === 'buy' ? Side.BUY : Side.SELL
+          const hedgeAmount =
+            hedgeSideEnum === Side.BUY
+              ? hedgeFillPrice * paperFill.size
+              : paperFill.size
+          const resp = await this.getClient().createAndPostMarketOrder(
+            {
+              tokenID: tokenId,
+              amount: hedgeAmount,
+              side: hedgeSideEnum,
+              price: hedgeFillPrice,
+            },
+            undefined,
+            OrderType.FOK,
+          )
+          const r = resp as Record<string, unknown>
+          hedgeOrderId = String(r['orderID'] ?? r['id'] ?? realFillId)
+          if (typeof r['price'] === 'number') {
+            actualHedgePrice = r['price'] as number
+          } else if (typeof r['avgPrice'] === 'number') {
+            actualHedgePrice = r['avgPrice'] as number
           }
-          if (typeof resp['transactionHash'] === 'string') {
-            txHash = resp['transactionHash'] as string
-          }
+          // API returns transactionsHashes (plural, array)
+          const hashes = r['transactionsHashes'] as string[] | undefined
+          txHash = hashes?.[0] ?? null
           hedgeStatus = 'done'
           this.logger.log(`CLOB hedge filled: ${hedgeOrderId} @ ${actualHedgePrice}`)
         } catch (err) {
