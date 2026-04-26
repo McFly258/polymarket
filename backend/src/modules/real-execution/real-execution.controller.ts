@@ -2,6 +2,7 @@ import { Controller, Get, Post, Logger } from '@nestjs/common'
 
 import { FillRepo } from '../persistence/fill.repo'
 
+import { ClobBroker, type BalanceSnapshot } from './clob-broker'
 import { RealFillRepo } from './real-fill.repo'
 import { RealOrderRepo } from './real-order.repo'
 import { RealStateRepo } from './real-state.repo'
@@ -9,6 +10,12 @@ import {
   ReconciliationService,
   type ReconciliationStatus,
 } from './reconciliation.service'
+
+export interface BalanceDto extends BalanceSnapshot {
+  minBalanceUsdc: number
+  sufficient: boolean
+  enabled: boolean
+}
 
 export interface RealStatusDto {
   enabled: boolean
@@ -41,6 +48,7 @@ export class RealExecutionController {
     private readonly realOrderRepo: RealOrderRepo,
     private readonly reconciler: ReconciliationService,
     private readonly fillRepo: FillRepo,
+    private readonly broker: ClobBroker,
   ) {}
 
   @Get('admin/real/status')
@@ -53,6 +61,18 @@ export class RealExecutionController {
       pauseReason: state.pauseReason,
       dailyLossUsd: state.dailyLossUsd,
       maxDailyLossUsd,
+    }
+  }
+
+  @Get('admin/real/balance')
+  async getBalance(): Promise<BalanceDto> {
+    const minBalanceUsdc = Number(process.env['REAL_MIN_BALANCE_USD'] ?? 10)
+    const snapshot = await this.broker.getBalance()
+    return {
+      ...snapshot,
+      minBalanceUsdc,
+      sufficient: snapshot.balanceUsdc >= minBalanceUsdc,
+      enabled: this.broker.isEnabled(),
     }
   }
 

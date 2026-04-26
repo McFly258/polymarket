@@ -1,5 +1,5 @@
-import { Injectable, Logger, OnModuleInit } from '@nestjs/common'
-import { ClobClient, Chain, OrderType, Side } from '@polymarket/clob-client'
+import { Injectable, Logger, OnApplicationShutdown, OnModuleInit } from '@nestjs/common'
+import { ClobClient, Chain, AssetType, OrderType, Side } from '@polymarket/clob-client'
 import { createWalletClient, http } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import { polygon } from 'viem/chains'
@@ -37,10 +37,17 @@ function envNum(key: string, fallback: number): number {
 // All methods are no-ops unless ENABLE_REAL_EXECUTION=true AND state.paused=false.
 // Every call persists to the real_* tables, so paper↔real joins via decisionId
 // work even when dispatch is disabled (real rows are recorded as 'skipped').
+export interface BalanceSnapshot {
+  balanceUsdc: number
+  allowances: Record<string, number>
+  checkedAt: number
+}
+
 @Injectable()
-export class ClobBroker implements OnModuleInit {
+export class ClobBroker implements OnModuleInit, OnApplicationShutdown {
   private readonly logger = new Logger(ClobBroker.name)
   private _client: ClobClient | null = null
+  private _balanceTimer: NodeJS.Timeout | null = null
 
   constructor(
     private readonly orderRepo: RealOrderRepo,
@@ -61,6 +68,23 @@ export class ClobBroker implements OnModuleInit {
       )
     }
     this.logger.log('Real execution enabled — credentials verified at startup')
+    this._balanceTimer = setInterval(() => {
+      void this.checkBalance().catch((err) => {
+        this.logger.warn(
+          `balance check failed: ${err instanceof Error ? err.message : String(err)}`,
+        )
+      })
+    }, this.balanceCheckIntervalMs)
+    this.logger.log(
+      `Balance watch armed — checking every ${this.balanceCheckIntervalMs / 1000}s, min $${this.minBalanceUsdc}`,
+    )
+  }
+
+  onApplicationShutdown(): void {
+    if (this._balanceTimer) {
+      clearInterval(this._balanceTimer)
+      this._balanceTimer = null
+    }
   }
 
   private get walletPrivateKey(): string {
@@ -80,6 +104,18 @@ export class ClobBroker implements OnModuleInit {
   }
   private get maxNotional(): number {
     return envNum('REAL_MAX_NOTIONAL_USD', 5000)
+  }
+  private get minBalanceUsdc(): number {
+    return envNum('REAL_MIN_BALANCE_USD', 10)
+  }
+  private get balanceCheckIntervalMs(): number {
+    return envNum('REAL_BALANCE_CHECK_INTERVAL_MS', 300_000)
+  }
+  // Polymarket signature type: 0=EOA, 1=POLY_PROXY, 2=POLY_GNOSIS_SAFE.
+  // Default 2 because deposits via the Polymarket UI / MetaMask park USDC in a
+  // Gnosis Safe controlled by the EOA, not the EOA itself.
+  private get polySignatureType(): number {
+    return envNum('POLY_SIGNATURE_TYPE', 2)
   }
 
   private isRealEnabled(): boolean {
@@ -112,6 +148,7 @@ export class ClobBroker implements OnModuleInit {
       Chain.POLYGON,
       walletClient,
       { key: this.apiKey, secret: this.apiSecret, passphrase: this.apiPassphrase },
+      this.polySignatureType,
     )
     return this._client
   }
@@ -139,6 +176,35 @@ export class ClobBroker implements OnModuleInit {
       )
     }
     await this.stateRepo.write({ dailyLossUsd: dailyLoss, dailyLossDayUtc: today })
+  }
+
+  async getBalance(): Promise<BalanceSnapshot> {
+    // USDC has 6 decimals; CLOB returns raw integer strings.
+    const USDC_DECIMALS = 1_000_000
+    const raw = (await this.getClient().getBalanceAllowance({
+      asset_type: AssetType.COLLATERAL,
+      signature_type: this.polySignatureType,
+    } as unknown as { asset_type: AssetType })) as unknown as Record<string, unknown>
+    const balanceUsdc = Number(raw['balance'] ?? 0) / USDC_DECIMALS
+    const rawAllowances = (raw['allowances'] ?? {}) as Record<string, unknown>
+    const allowances: Record<string, number> = {}
+    for (const [addr, val] of Object.entries(rawAllowances)) {
+      allowances[addr] = Number(val) / USDC_DECIMALS
+    }
+    return { balanceUsdc, allowances, checkedAt: Date.now() }
+  }
+
+  private async checkBalance(): Promise<void> {
+    const state = await this.stateRepo.read()
+    if (state.paused) return
+    const { balanceUsdc } = await this.getBalance()
+    if (balanceUsdc < this.minBalanceUsdc) {
+      const reason = `balance too low: $${balanceUsdc.toFixed(2)} < min $${this.minBalanceUsdc}`
+      this.logger.warn(`Auto-pausing real execution: ${reason}`)
+      await this.stateRepo.write({ paused: true, pauseReason: reason })
+    } else {
+      this.logger.debug(`Balance OK: $${balanceUsdc.toFixed(2)} USDC`)
+    }
   }
 
   // Public GET helpers exposed for the reconciler. Only called when real
