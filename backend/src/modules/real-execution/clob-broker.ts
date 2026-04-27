@@ -254,7 +254,12 @@ export class ClobBroker implements OnModuleInit, OnApplicationShutdown {
     let status: RealOrderRow['status'] = dispatch ? 'pending' : 'skipped'
     let rejectReason: string | null = null
 
-    if (dispatch && notional > this.maxNotional) {
+    const CLOB_MIN_SIZE = 5
+    if (dispatch && paperOrder.size < CLOB_MIN_SIZE) {
+      status = 'rejected'
+      rejectReason = `size ${paperOrder.size} < CLOB minimum ${CLOB_MIN_SIZE}`
+      this.logger.warn(`onOrderPlaced rejected: ${rejectReason} (decision ${decisionId})`)
+    } else if (dispatch && notional > this.maxNotional) {
       status = 'rejected'
       rejectReason = `notional $${notional} > max $${this.maxNotional}`
       this.logger.warn(`onOrderPlaced rejected: ${rejectReason} (decision ${decisionId})`)

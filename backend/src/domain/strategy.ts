@@ -9,7 +9,7 @@ import type {
 
 export const DEFAULT_STRATEGY: StrategyConfig = {
   totalCapitalUsd: 10,
-  perMarketCapitalUsd: 2,
+  perMarketCapitalUsd: 3,
   postingDistancePct: 0.7,
   minTicksBehindTop: 2,
   minYieldPct: 0.05,
@@ -46,10 +46,12 @@ export const DEFAULT_STRATEGY: StrategyConfig = {
   topUpWinnersEnabled: true,
   topUpMultiplier: 2,
   softFallbackEnabled: true,
+  subMinFallbackEnabled: true,
   softFallbackCapitalFraction: 0.5,
-  softFallbackMinSharePct: 1.5,
+  softFallbackMinSharePct: 0,
   softFallbackMinYieldPct: 0.02,
   asymmetricSizingEnabled: true,
+  maxRewardMinSize: 200,
 }
 
 // ── Reward scoring ──────────────────────────────────────────────────────────
@@ -376,12 +378,14 @@ export function runSimulation(
 ): SimulationResult {
   const now = Date.now()
 
+  const maxRewardMinSize = config.maxRewardMinSize ?? Infinity
   const pool = rows
     .filter((r) => r.dailyRate > 0)
     .filter((r) => {
       const days = daysUntil(r.endDateIso, now)
       return days === null || days >= config.minDaysToResolution
     })
+    .filter((r) => r.rewardMinSize <= maxRewardMinSize)
 
   // ── Primary pass — reward-eligible markets only (budget can meet rewardMinSize) ──
   const primaryConfig: StrategyConfig = { ...config, enforceRewardMinSize: true }
@@ -446,7 +450,7 @@ export function runSimulation(
       ...config,
       enforceRewardMinSize: false,
       perMarketCapitalUsd: Math.max(1, config.perMarketCapitalUsd * fraction),
-      minExpectedRewardSharePct: config.softFallbackMinSharePct ?? 1.5,
+      minExpectedRewardSharePct: 0,
     }
     const fallbackMinYield = config.softFallbackMinYieldPct ?? 0.02
     const remainingPool = pool

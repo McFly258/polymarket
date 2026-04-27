@@ -181,8 +181,9 @@ export class EngineAllocService {
     const askCapital = alloc.askCapitalUsd ?? alloc.capitalUsd / 2
     const bidSize = Math.floor(bidCapital / Math.max(alloc.bidPrice, 0.01))
     const askSize = Math.floor(askCapital / Math.max(alloc.askPrice, 0.01))
-    if (bidSize < 1 || askSize < 1) {
-      this.logger.log(`skip ${tag} — capital too small for min 1 token (bidSize=${bidSize.toFixed(2)} askSize=${askSize.toFixed(2)})`)
+    const CLOB_MIN_ORDER_SIZE = 5
+    if (bidSize < CLOB_MIN_ORDER_SIZE || askSize < CLOB_MIN_ORDER_SIZE) {
+      this.logger.log(`skip ${tag} — size below CLOB min ${CLOB_MIN_ORDER_SIZE} (bid=${bidSize} ask=${askSize})`)
       return
     }
 

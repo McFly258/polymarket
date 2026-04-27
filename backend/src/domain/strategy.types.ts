@@ -32,6 +32,7 @@ export interface StrategyConfig {
   asymmetricSizingEnabled?: boolean
   enforceRewardMinSize?: boolean
   subMinFallbackEnabled?: boolean
+  maxRewardMinSize?: number
 }
 
 export interface StrategyAllocation {
