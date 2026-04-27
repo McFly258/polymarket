@@ -30,6 +30,8 @@ export interface StrategyConfig {
   softFallbackMinSharePct?: number
   softFallbackMinYieldPct?: number
   asymmetricSizingEnabled?: boolean
+  enforceRewardMinSize?: boolean
+  subMinFallbackEnabled?: boolean
 }
 
 export interface StrategyAllocation {

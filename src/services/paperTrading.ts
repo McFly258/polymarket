@@ -205,7 +205,7 @@ export class PaperTradingEngine {
 
   snapshot(): EngineSnapshot {
     if (this.cachedSnapshot) return this.cachedSnapshot
-    this.cachedSnapshot = {
+    const snap: EngineSnapshot = {
       state: this.state,
       startedAt: this.startedAt,
       brokerKind: this.broker.kind,
@@ -224,9 +224,11 @@ export class PaperTradingEngine {
         bestAsk: p.bestAsk,
         rewardSharePct: p.rewardSharePct,
         expectedRatePerDay: p.expectedRatePerDay,
+        capitalUsd: p.capitalUsd,
       })),
     }
-    return this.cachedSnapshot
+    this.cachedSnapshot = snap
+    return snap
   }
 
   async start(
@@ -251,8 +253,15 @@ export class PaperTradingEngine {
       if (!yesBook) continue
 
       const halfCapital = a.capitalUsd / 2
-      const bidSize = Math.max(row.rewardMinSize, halfCapital / Math.max(a.bidPrice, 0.01))
-      const askSize = Math.max(row.rewardMinSize, halfCapital / Math.max(a.askPrice, 0.01))
+      const bidSizeByCapital = Math.max(1, Math.floor(halfCapital / Math.max(a.bidPrice, 0.01)))
+      const askSizeByCapital = Math.max(1, Math.floor(halfCapital / Math.max(a.askPrice, 0.01)))
+      // Only use rewardMinSize if capital can cover it; otherwise fall back to capital-based size
+      const bidSize = row.rewardMinSize * a.bidPrice <= halfCapital
+        ? Math.max(row.rewardMinSize, bidSizeByCapital)
+        : bidSizeByCapital
+      const askSize = row.rewardMinSize * a.askPrice <= halfCapital
+        ? Math.max(row.rewardMinSize, askSizeByCapital)
+        : askSizeByCapital
 
       const bidReq: PlaceOrderRequest = {
         conditionId: a.conditionId,

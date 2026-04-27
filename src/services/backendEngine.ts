@@ -121,12 +121,11 @@ function emptySnapshot(): EngineSnapshot {
 class BackendEngineClientImpl implements BackendEngineClient {
   private snap: EngineSnapshot = emptySnapshot()
   private listeners = new Set<() => void>()
-  private timer: number | null = null
   private error: string | null = null
 
   constructor() {
     void this.poll()
-    this.timer = window.setInterval(() => void this.poll(), POLL_MS)
+    window.setInterval(() => void this.poll(), POLL_MS)
   }
 
   snapshot(): EngineSnapshot {

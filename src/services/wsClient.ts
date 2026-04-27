@@ -15,11 +15,6 @@ const MAX_IDS_PER_SOCKET = 200
 // number of sockets to 2 and the per-message work on the main thread minimal.
 const MAX_STREAMED_ASSETS = 400
 
-// Batch window: accumulate book updates for this many ms before flushing to the
-// paper-engine worker in one postMessage. Reduces cross-thread IPC overhead
-// significantly when many markets move simultaneously.
-const WORKER_BATCH_MS = 250
-
 export type ConnectionState = 'idle' | 'connecting' | 'open' | 'reconnecting' | 'closed'
 
 interface RawBookMsg {

@@ -56,7 +56,7 @@ export class RealExecutionController {
     const state = await this.stateRepo.read()
     const maxDailyLossUsd = Number(process.env['REAL_MAX_DAILY_LOSS_USD'] ?? 100)
     return {
-      enabled: state.enabled,
+      enabled: this.broker.isEnabled(),
       paused: state.paused,
       pauseReason: state.pauseReason,
       dailyLossUsd: state.dailyLossUsd,

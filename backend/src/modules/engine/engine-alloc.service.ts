@@ -179,8 +179,12 @@ export class EngineAllocService {
 
     const bidCapital = alloc.bidCapitalUsd ?? alloc.capitalUsd / 2
     const askCapital = alloc.askCapitalUsd ?? alloc.capitalUsd / 2
-    const bidSize = Math.max(row.rewardMinSize, bidCapital / Math.max(alloc.bidPrice, 0.01))
-    const askSize = Math.max(row.rewardMinSize, askCapital / Math.max(alloc.askPrice, 0.01))
+    const bidSize = Math.floor(bidCapital / Math.max(alloc.bidPrice, 0.01))
+    const askSize = Math.floor(askCapital / Math.max(alloc.askPrice, 0.01))
+    if (bidSize < 1 || askSize < 1) {
+      this.logger.log(`skip ${tag} — capital too small for min 1 token (bidSize=${bidSize.toFixed(2)} askSize=${askSize.toFixed(2)})`)
+      return
+    }
 
     // C2a: hedge slippage
     const bidHedgeSlip = alloc.bidPrice > 0 ? (alloc.bidPrice - bestBid) / alloc.bidPrice : 1

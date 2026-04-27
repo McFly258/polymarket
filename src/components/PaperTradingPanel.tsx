@@ -77,7 +77,7 @@ export function PaperTradingPanel({ rows, config, sim }: Props) {
   // Default to the backend engine — it's the one that keeps trading across
   // tab closes, reloads, and EC2 process restarts. "Browser" is kept around
   // as a quick local test mode.
-  const [source, setSource] = useState<EngineSource>('backend')
+  const [source] = useState<EngineSource>('backend')
   const facade = useMemo(
     () => source === 'backend'
       ? backendFacade(backendClient, config)

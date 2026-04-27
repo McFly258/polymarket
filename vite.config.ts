@@ -2,7 +2,7 @@ import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import polymarketApiPlugin from './collector/vite-plugin'
 
-const PAPER_PORT = process.env.PAPER_PORT ?? '7801'
+const PAPER_PORT = process.env.PAPER_PORT ?? '7802'
 
 const clobProxy = {
   '/clob-api': {

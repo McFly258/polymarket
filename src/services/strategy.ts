@@ -8,8 +8,8 @@ import type {
 } from '../types'
 
 export const DEFAULT_STRATEGY: StrategyConfig = {
-  totalCapitalUsd: 2000,
-  perMarketCapitalUsd: 30,
+  totalCapitalUsd: 10,
+  perMarketCapitalUsd: 2,
   postingDistancePct: 0.7,
   minTicksBehindTop: 2,
   minYieldPct: 0.05,
@@ -36,10 +36,10 @@ export const DEFAULT_STRATEGY: StrategyConfig = {
   fillWindowMinutes: 30,
   blacklistMinutes: 60,
   minExpectedRewardSharePct: 3,
-  marketLossLimitUsd: 3,
+  marketLossLimitUsd: 0.15,
   marketLossWindowHours: 24,
   marketLossBlacklistMinutes: 240,
-  globalLossLimitUsd: 15,
+  globalLossLimitUsd: 0.75,
   globalLossWindowHours: 24,
   globalPauseMinutes: 120,
   closePositionDaysToResolution: 2,

@@ -117,6 +117,9 @@ export class ClobBroker implements OnModuleInit, OnApplicationShutdown {
   private get polySignatureType(): number {
     return envNum('POLY_SIGNATURE_TYPE', 2)
   }
+  private get funderAddress(): string | undefined {
+    return env('CLOB_FUNDER_ADDRESS', '') || undefined
+  }
 
   private isRealEnabled(): boolean {
     return envBool('ENABLE_REAL_EXECUTION', false)
@@ -149,6 +152,7 @@ export class ClobBroker implements OnModuleInit, OnApplicationShutdown {
       walletClient,
       { key: this.apiKey, secret: this.apiSecret, passphrase: this.apiPassphrase },
       this.polySignatureType,
+      this.funderAddress,
     )
     return this._client
   }
@@ -266,11 +270,11 @@ export class ClobBroker implements OnModuleInit, OnApplicationShutdown {
           undefined,
           OrderType.GTC,
         )
-        clobOrderId = String(
-          (resp as Record<string, unknown>)['orderID'] ??
-          (resp as Record<string, unknown>)['id'] ??
-          clobOrderId,
-        )
+        const r = resp as Record<string, unknown>
+        if (!r['success']) {
+          throw new Error(String(r['errorMsg'] ?? r['error'] ?? 'Polymarket rejected order'))
+        }
+        clobOrderId = String(r['orderID'] ?? r['id'] ?? clobOrderId)
         status = 'accepted'
         this.logger.log(`CLOB order placed: ${clobOrderId} (decision ${decisionId})`)
       } catch (err) {
@@ -379,6 +383,9 @@ export class ClobBroker implements OnModuleInit, OnApplicationShutdown {
             OrderType.FOK,
           )
           const r = resp as Record<string, unknown>
+          if (!r['success']) {
+            throw new Error(String(r['errorMsg'] ?? r['error'] ?? 'Polymarket rejected hedge'))
+          }
           hedgeOrderId = String(r['orderID'] ?? r['id'] ?? realFillId)
           if (typeof r['price'] === 'number') {
             actualHedgePrice = r['price'] as number

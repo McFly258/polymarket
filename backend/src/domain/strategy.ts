@@ -8,8 +8,8 @@ import type {
 } from './strategy.types'
 
 export const DEFAULT_STRATEGY: StrategyConfig = {
-  totalCapitalUsd: 2000,
-  perMarketCapitalUsd: 30,
+  totalCapitalUsd: 10,
+  perMarketCapitalUsd: 2,
   postingDistancePct: 0.7,
   minTicksBehindTop: 2,
   minYieldPct: 0.05,
@@ -36,10 +36,10 @@ export const DEFAULT_STRATEGY: StrategyConfig = {
   fillWindowMinutes: 30,
   blacklistMinutes: 60,
   minExpectedRewardSharePct: 3,
-  marketLossLimitUsd: 3,
+  marketLossLimitUsd: 0.15,
   marketLossWindowHours: 24,
   marketLossBlacklistMinutes: 240,
-  globalLossLimitUsd: 15,
+  globalLossLimitUsd: 0.75,
   globalLossWindowHours: 24,
   globalPauseMinutes: 120,
   closePositionDaysToResolution: 2,
@@ -228,9 +228,14 @@ function allocateMarket(
   const bidShares = halfCapital / Math.max(bidPrice, 0.01)
   const askShares = halfCapital / Math.max(askPrice, 0.01)
   const minSize = row.rewardMinSize
+  const bidBelowMin = bidShares < minSize
+  const askBelowMin = askShares < minSize
 
-  if (bidShares < minSize) warnings.push(`bid ${bidShares.toFixed(0)} < min ${minSize}`)
-  if (askShares < minSize) warnings.push(`ask ${askShares.toFixed(0)} < min ${minSize}`)
+  // When enforceRewardMinSize is set, reject markets our capital cannot meet the LP reward floor.
+  if (config.enforceRewardMinSize && (bidBelowMin || askBelowMin)) return null
+
+  if (bidBelowMin) warnings.push(`bid ${bidShares.toFixed(0)} < min ${minSize} (sub-reward)`)
+  if (askBelowMin) warnings.push(`ask ${askShares.toFixed(0)} < min ${minSize} (sub-reward)`)
 
   const bidDistance = mid - bidPrice
   const askDistance = askPrice - mid
@@ -378,8 +383,9 @@ export function runSimulation(
       return days === null || days >= config.minDaysToResolution
     })
 
-  // ── Primary pass ──
-  const candidates = scoreAndFilter(pool, config, volatility, now, config.minYieldPct)
+  // ── Primary pass — reward-eligible markets only (budget can meet rewardMinSize) ──
+  const primaryConfig: StrategyConfig = { ...config, enforceRewardMinSize: true }
+  const candidates = scoreAndFilter(pool, primaryConfig, volatility, now, config.minYieldPct)
 
   const allocations: StrategyAllocation[] = []
   let remaining = config.totalCapitalUsd
@@ -427,20 +433,25 @@ export function runSimulation(
     }
   }
 
-  // ── Soft fallback — fills any remaining budget with looser-threshold markets
-  // at a fraction of the per-market cap. Smaller per-market exposure keeps the
-  // worst-case loss bounded at ~`softFallbackCapitalFraction` × the primary cap,
-  // while still capturing rewards on markets that narrowly missed the main gate.
-  const softEnabled = config.softFallbackEnabled ?? true
-  if (softEnabled && remaining > 0) {
-    const fraction = config.softFallbackCapitalFraction ?? 0.5
+  // ── Sub-minimum fallback — when primary pass finds no reward-eligible markets
+  // (capital too small to meet rewardMinSize), trade any reward market at sub-minimum
+  // sizes. Orders won't earn LP rewards but still practice order flow and get fills.
+  // When primary did allocate some markets, this pass uses a smaller capital fraction.
+  const subMinEnabled = config.subMinFallbackEnabled !== false  // default true
+  const softEnabled = config.softFallbackEnabled !== false       // default true
+  if ((subMinEnabled || softEnabled) && remaining > 0) {
+    const primaryAllocCount = allocations.length
+    const fraction = primaryAllocCount === 0 ? 1.0 : (config.softFallbackCapitalFraction ?? 0.5)
     const fallbackConfig: StrategyConfig = {
       ...config,
+      enforceRewardMinSize: false,
       perMarketCapitalUsd: Math.max(1, config.perMarketCapitalUsd * fraction),
       minExpectedRewardSharePct: config.softFallbackMinSharePct ?? 1.5,
     }
     const fallbackMinYield = config.softFallbackMinYieldPct ?? 0.02
-    const remainingPool = pool.filter((r) => !occupied.has(r.conditionId))
+    const remainingPool = pool
+      .filter((r) => !occupied.has(r.conditionId))
+      .sort((a, b) => a.rewardMinSize - b.rewardMinSize)  // prefer markets closest to eligibility
     const fallbackCandidates = scoreAndFilter(remainingPool, fallbackConfig, volatility, now, fallbackMinYield)
     for (const c of fallbackCandidates) {
       if (remaining < c.capitalUsd) break

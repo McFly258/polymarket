@@ -45,6 +45,7 @@ services:
       CLOB_API_PASSPHRASE: ${CLOB_API_PASSPHRASE:-your-passphrase-here}
       REAL_MAX_DAILY_LOSS_USD: ${REAL_MAX_DAILY_LOSS_USD:-100}
       REAL_MAX_NOTIONAL_USD: ${REAL_MAX_NOTIONAL_USD:-5000}
+      CLOB_FUNDER_ADDRESS: ${CLOB_FUNDER_ADDRESS:-}
     ports:
       - "127.0.0.1:7802:7802"
     healthcheck:
