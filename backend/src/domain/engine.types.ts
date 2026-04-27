@@ -6,6 +6,7 @@ export interface InternalPosition {
   conditionId: string
   question: string
   tokenId: string
+  noTokenId?: string
   outcome: string
   decisionId: string | null
   bidOrderId: string | null

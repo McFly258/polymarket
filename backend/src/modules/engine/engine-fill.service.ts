@@ -183,6 +183,7 @@ export class EngineFillService {
       hedgeExpectedPrice: orderPrice,
       hedgeFillPrice: hedgePrice,
       tokenId: pos.tokenId,
+      noTokenId: pos.noTokenId,
       isPassiveHedge,
     } satisfies OrderFilledEvent)
 

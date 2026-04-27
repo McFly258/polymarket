@@ -15,6 +15,9 @@ export const ENGINE_EVENT = {
 export interface OrderPlacedEvent {
   decisionId: string
   paperOrder: OrderRow
+  // NO token companion — present on ask-side orders so the CLOB broker can
+  // dispatch buy-NO instead of sell-YES (USDC-only, no inventory required).
+  noTokenId?: string
 }
 
 export interface OrderCancelledEvent {
@@ -30,6 +33,9 @@ export interface OrderFilledEvent {
   hedgeExpectedPrice: number
   hedgeFillPrice: number
   tokenId: string
+  // Present on ask-side fills — tells the CLOB broker to sell-NO instead of
+  // buy-YES when unwinding the real buy-NO position.
+  noTokenId?: string
   // Paper decided the fill was un-hedgeable (slip > cap). The real side must
   // not dispatch a market hedge here — mirroring the paper "passive hedge" path
   // keeps the two sides comparable and avoids unbounded market-order slippage.

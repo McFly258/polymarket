@@ -245,9 +245,15 @@ export class ClobBroker implements OnModuleInit, OnApplicationShutdown {
   }
 
   async onOrderPlaced(evt: OrderPlacedEvent): Promise<void> {
-    const { decisionId, paperOrder } = evt
+    const { decisionId, paperOrder, noTokenId } = evt
     const postedAt = paperOrder.postedAt
-    const notional = paperOrder.price * paperOrder.size
+    // Ask-side orders are flipped to buy-NO when noTokenId is available:
+    // sell YES @ P ≡ buy NO @ (1-P) — both require only USDC, no inventory.
+    const useNoBuy = paperOrder.side === 'ask' && !!noTokenId
+    const realTokenId = useNoBuy ? noTokenId! : paperOrder.tokenId
+    const realSide = useNoBuy ? Side.BUY : (paperOrder.side === 'bid' ? Side.BUY : Side.SELL)
+    const realPrice = useNoBuy ? 1 - paperOrder.price : paperOrder.price
+    const notional = realPrice * paperOrder.size
     const dispatch = await this.dispatchAllowed()
 
     let clobOrderId = `real-${paperOrder.id}`
@@ -267,10 +273,10 @@ export class ClobBroker implements OnModuleInit, OnApplicationShutdown {
       try {
         const resp = await this.getClient().createAndPostOrder(
           {
-            tokenID: paperOrder.tokenId,
-            price: paperOrder.price,
+            tokenID: realTokenId,
+            price: realPrice,
             size: paperOrder.size,
-            side: paperOrder.side === 'bid' ? Side.BUY : Side.SELL,
+            side: realSide,
           },
           undefined,
           OrderType.GTC,
@@ -281,7 +287,8 @@ export class ClobBroker implements OnModuleInit, OnApplicationShutdown {
         }
         clobOrderId = String(r['orderID'] ?? r['id'] ?? clobOrderId)
         status = 'accepted'
-        this.logger.log(`CLOB order placed: ${clobOrderId} (decision ${decisionId})`)
+        const label = useNoBuy ? `buy-NO @ ${realPrice.toFixed(3)}` : `${paperOrder.side} @ ${realPrice.toFixed(3)}`
+        this.logger.log(`CLOB order placed: ${clobOrderId} [${label}] (decision ${decisionId})`)
       } catch (err) {
         rejectReason = err instanceof Error ? err.message : String(err)
         status = 'rejected'
@@ -340,6 +347,7 @@ export class ClobBroker implements OnModuleInit, OnApplicationShutdown {
       hedgeExpectedPrice,
       hedgeFillPrice,
       tokenId,
+      noTokenId,
       isPassiveHedge,
     } = evt
     const filledAt = paperFill.filledAt
@@ -363,7 +371,13 @@ export class ClobBroker implements OnModuleInit, OnApplicationShutdown {
       hedgeStatus = 'skipped'
     } else {
       hedgeStatus = 'pending'
-      const notional = hedgeFillPrice * paperFill.size
+      // Ask-side fills: the real position is buy-NO, so unwind by selling NO.
+      // sell YES @ P (paper hedge buy) ≡ sell NO @ (1-P) (real unwind).
+      const useNoSell = hedgeSide === 'buy' && !!noTokenId
+      const realTokenId = useNoSell ? noTokenId! : tokenId
+      const realHedgeSide = useNoSell ? Side.SELL : (hedgeSide === 'buy' ? Side.BUY : Side.SELL)
+      const realHedgePrice = useNoSell ? 1 - hedgeFillPrice : hedgeFillPrice
+      const notional = realHedgePrice * paperFill.size
       if (notional > this.maxNotional) {
         hedgeStatus = 'failed'
         this.logger.warn(
@@ -372,17 +386,16 @@ export class ClobBroker implements OnModuleInit, OnApplicationShutdown {
       } else {
         try {
           // SDK semantics: BUY amount = USDC to spend; SELL amount = shares to sell.
-          const hedgeSideEnum = hedgeSide === 'buy' ? Side.BUY : Side.SELL
           const hedgeAmount =
-            hedgeSideEnum === Side.BUY
-              ? hedgeFillPrice * paperFill.size
+            realHedgeSide === Side.BUY
+              ? realHedgePrice * paperFill.size
               : paperFill.size
           const resp = await this.getClient().createAndPostMarketOrder(
             {
-              tokenID: tokenId,
+              tokenID: realTokenId,
               amount: hedgeAmount,
-              side: hedgeSideEnum,
-              price: hedgeFillPrice,
+              side: realHedgeSide,
+              price: realHedgePrice,
             },
             undefined,
             OrderType.FOK,

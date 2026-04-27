@@ -156,6 +156,7 @@ export class EngineAllocService {
     if (alloc.bidPrice === null || alloc.askPrice === null) return
     const yesBook = row.books[0]
     if (!yesBook) return
+    const noBook = row.books[1]
 
     const bestBid = yesBook.bestBid ?? 0
     const bestAsk = yesBook.bestAsk ?? 1
@@ -295,12 +296,13 @@ export class EngineAllocService {
     await this.orderRepo.insert(bidOrder)
     await this.orderRepo.insert(askOrder)
     this.events.emit(ENGINE_EVENT.ORDER_PLACED, { decisionId, paperOrder: bidOrder } satisfies OrderPlacedEvent)
-    this.events.emit(ENGINE_EVENT.ORDER_PLACED, { decisionId, paperOrder: askOrder } satisfies OrderPlacedEvent)
+    this.events.emit(ENGINE_EVENT.ORDER_PLACED, { decisionId, paperOrder: askOrder, noTokenId: noBook?.tokenId } satisfies OrderPlacedEvent)
 
     const pos: InternalPosition = {
       conditionId: alloc.conditionId,
       question: alloc.question,
       tokenId: yesBook.tokenId,
+      noTokenId: noBook?.tokenId,
       outcome: yesBook.outcome,
       decisionId,
       bidOrderId: bidRes.id,
