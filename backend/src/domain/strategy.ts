@@ -8,8 +8,8 @@ import type {
 } from './strategy.types'
 
 export const DEFAULT_STRATEGY: StrategyConfig = {
-  totalCapitalUsd: 10,
-  perMarketCapitalUsd: 2,
+  totalCapitalUsd: 50,
+  perMarketCapitalUsd: 10,
   postingDistancePct: 0.7,
   minTicksBehindTop: 2,
   minYieldPct: 0.05,
@@ -36,10 +36,10 @@ export const DEFAULT_STRATEGY: StrategyConfig = {
   fillWindowMinutes: 30,
   blacklistMinutes: 60,
   minExpectedRewardSharePct: 3,
-  marketLossLimitUsd: 0.15,
+  marketLossLimitUsd: 0.75,
   marketLossWindowHours: 24,
   marketLossBlacklistMinutes: 240,
-  globalLossLimitUsd: 0.75,
+  globalLossLimitUsd: 3.75,
   globalLossWindowHours: 24,
   globalPauseMinutes: 120,
   closePositionDaysToResolution: 2,
@@ -51,7 +51,7 @@ export const DEFAULT_STRATEGY: StrategyConfig = {
   softFallbackMinSharePct: 0,
   softFallbackMinYieldPct: 0.02,
   asymmetricSizingEnabled: true,
-  maxRewardMinSize: 10,
+  maxRewardMinSize: 50,
 }
 
 // ── Reward scoring ──────────────────────────────────────────────────────────
