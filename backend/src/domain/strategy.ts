@@ -9,7 +9,7 @@ import type {
 
 export const DEFAULT_STRATEGY: StrategyConfig = {
   totalCapitalUsd: 10,
-  perMarketCapitalUsd: 3,
+  perMarketCapitalUsd: 2,
   postingDistancePct: 0.7,
   minTicksBehindTop: 2,
   minYieldPct: 0.05,
@@ -47,11 +47,11 @@ export const DEFAULT_STRATEGY: StrategyConfig = {
   topUpMultiplier: 2,
   softFallbackEnabled: true,
   subMinFallbackEnabled: true,
-  softFallbackCapitalFraction: 0.5,
+  softFallbackCapitalFraction: 1.0,
   softFallbackMinSharePct: 0,
   softFallbackMinYieldPct: 0.02,
   asymmetricSizingEnabled: true,
-  maxRewardMinSize: 200,
+  maxRewardMinSize: 10,
 }
 
 // ── Reward scoring ──────────────────────────────────────────────────────────
