@@ -67,7 +67,9 @@ export class ClobBroker implements OnModuleInit, OnApplicationShutdown {
         `ENABLE_REAL_EXECUTION=true but required env vars are missing: ${missing.join(', ')}`,
       )
     }
-    this.logger.log('Real execution enabled — credentials verified at startup')
+    // Clear any persisted pause from the previous run so restarts always start unpaused.
+    await this.stateRepo.write({ paused: false, pauseReason: null })
+    this.logger.log('Real execution enabled — credentials verified at startup, pause state cleared')
 
     // Pre-flight: clean slate before the engine resumes. This guards against
     // stale orders / dangling inventory from a previous run (or a SIGKILL that
@@ -84,7 +86,6 @@ export class ClobBroker implements OnModuleInit, OnApplicationShutdown {
         `Startup liquidate failed: ${err instanceof Error ? err.message : String(err)}`,
       ),
     )
-
     this._balanceTimer = setInterval(() => {
       void this.checkBalance().catch((err) => {
         this.logger.warn(
