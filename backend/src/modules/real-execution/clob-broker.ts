@@ -164,7 +164,7 @@ export class ClobBroker implements OnModuleInit, OnApplicationShutdown {
       const size = Number(pos['size'] ?? 0)
       const curPrice = Number(pos['curPrice'] ?? pos['price'] ?? 0.5)
       if (!tokenId || size < 0.01) continue
-      const limitPrice = Math.max(curPrice - 0.05, 0.01)
+      const limitPrice = Math.max(curPrice - 0.01, 0.01)
       try {
         const r = (await this.getClient().createAndPostMarketOrder(
           { tokenID: tokenId, amount: size, side: Side.SELL, price: limitPrice },

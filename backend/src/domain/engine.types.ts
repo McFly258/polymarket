@@ -28,6 +28,9 @@ export interface InternalPosition {
   ourScore: number
   totalScore: number
   latestBook: BookView | null
+  // Set when one side fills naturally while the opposing order is still live.
+  // Cleared when the opposing order fills — no external hedge needed for either leg.
+  pendingPairFill?: 'bid' | 'ask'
 }
 
 export interface FillEntry {

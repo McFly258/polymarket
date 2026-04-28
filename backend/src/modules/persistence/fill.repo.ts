@@ -3,7 +3,7 @@ import { Injectable } from '@nestjs/common'
 import { PrismaService } from '../prisma/prisma.service'
 
 export type FillSide = 'bid' | 'ask'
-export type HedgeStatus = 'pending' | 'done' | 'failed'
+export type HedgeStatus = 'pending' | 'done' | 'failed' | 'not-applicable'
 
 export interface FillRow {
   id: string

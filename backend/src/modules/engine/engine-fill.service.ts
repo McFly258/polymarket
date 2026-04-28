@@ -113,6 +113,9 @@ export class EngineFillService {
     if (!orderId) return
     const config: StrategyConfig = s.config ?? ({ makerFeePct: 0, takerFeePct: 0 } as StrategyConfig)
 
+    const oppositeOrderId = side === 'bid' ? pos.askOrderId : pos.bidOrderId
+    const oppositeAlreadyPending = pos.pendingPairFill && pos.pendingPairFill !== side
+
     if (side === 'bid') pos.bidOrderId = null
     else pos.askOrderId = null
 
@@ -127,7 +130,9 @@ export class EngineFillService {
     const tripPct = fillTimeSlip > MAX_HEDGE_SLIPPAGE
     const tripAbs = fillTimeSlipAbs > MAX_HEDGE_SLIPPAGE_ABS
     const isPassiveHedge = tripPct || tripAbs
-    const hedgePrice = isPassiveHedge ? orderPrice : rawHedgePrice
+    // Pair-hedge: opposing GTC order is the natural hedge — skip FOK to capture full spread.
+    const usePairHedge = !isPassiveHedge && (oppositeOrderId || oppositeAlreadyPending)
+    const hedgePrice = isPassiveHedge || usePairHedge ? orderPrice : rawHedgePrice
     const hedgeSide = side === 'bid' ? 'sell' : 'buy'
     if (isPassiveHedge) {
       const reason =
@@ -135,7 +140,6 @@ export class EngineFillService {
           ? `abs slip $${fillTimeSlipAbs.toFixed(3)} > $${MAX_HEDGE_SLIPPAGE_ABS}`
           : `slip ${(fillTimeSlip * 100).toFixed(1)}% > ${(MAX_HEDGE_SLIPPAGE * 100).toFixed(0)}%`
       this.logger.log(`fill-time ${reason} on ${pos.conditionId.slice(0, 8)} — passive hedge at ${orderPrice}`)
-      const oppositeOrderId = side === 'bid' ? pos.askOrderId : pos.bidOrderId
       if (oppositeOrderId) {
         if (side === 'bid') pos.askOrderId = null
         else pos.bidOrderId = null
@@ -149,6 +153,14 @@ export class EngineFillService {
           } satisfies OrderCancelledEvent)
         })
       }
+    } else if (usePairHedge) {
+      // Mark the pair leg so the second fill (or shutdown) knows not to externally hedge.
+      pos.pendingPairFill = oppositeAlreadyPending ? undefined : side
+      this.logger.log(
+        `pair-hedge ${pos.conditionId.slice(0, 8)} — ${side} filled at ${orderPrice}, ${
+          oppositeAlreadyPending ? 'closing pair' : 'awaiting opposite leg'
+        }`,
+      )
     }
     const gross =
       side === 'bid' ? (hedgePrice - orderPrice) * orderSize : (orderPrice - hedgePrice) * orderSize
@@ -197,18 +209,23 @@ export class EngineFillService {
       `🔔 Fill (${side})\n${pos.question}\nprice=${orderPrice.toFixed(3)} size=${orderSize} pnl=${pnlSign}$${realisedPnl.toFixed(2)}`,
     )
 
-    try {
-      const hedgeRes = await this.broker.marketHedge({
-        conditionId: pos.conditionId,
-        tokenId: pos.tokenId,
-        side: hedgeSide,
-        size: orderSize,
-        expectedPrice: orderPrice,
-        fillPrice: hedgePrice,
-      })
-      await this.fillRepo.updateHedge(fillId, hedgeRes.id, 'done')
-    } catch {
-      await this.fillRepo.updateHedge(fillId, null, 'failed')
+    if (usePairHedge) {
+      // Opposing GTC order is the hedge — no external dispatch needed.
+      await this.fillRepo.updateHedge(fillId, null, 'not-applicable')
+    } else {
+      try {
+        const hedgeRes = await this.broker.marketHedge({
+          conditionId: pos.conditionId,
+          tokenId: pos.tokenId,
+          side: hedgeSide,
+          size: orderSize,
+          expectedPrice: orderPrice,
+          fillPrice: hedgePrice,
+        })
+        await this.fillRepo.updateHedge(fillId, hedgeRes.id, 'done')
+      } catch {
+        await this.fillRepo.updateHedge(fillId, null, 'failed')
+      }
     }
 
     if (isPassiveHedge) {
