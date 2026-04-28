@@ -163,6 +163,12 @@ export class ClobBroker implements OnModuleInit, OnApplicationShutdown {
     return !state.paused
   }
 
+  // Hedge retries are token sells — they don't spend USDC, so the low-balance
+  // pause should not block them. We only gate on ENABLE_REAL_EXECUTION.
+  private hedgeRetryAllowed(): boolean {
+    return this.isRealEnabled()
+  }
+
   private async checkAndUpdateDailyLoss(lossDelta: number): Promise<void> {
     const state = await this.stateRepo.read()
     const today = this.todayUtc()
@@ -242,6 +248,91 @@ export class ClobBroker implements OnModuleInit, OnApplicationShutdown {
 
   isEnabled(): boolean {
     return this.isRealEnabled()
+  }
+
+  // Looks up the NO-outcome token for a condition so hedge retries can close
+  // ask-side positions (which were opened as buy-NO in real execution).
+  async getNoTokenId(conditionId: string, yesTokenId: string): Promise<string | null> {
+    try {
+      const resp = await fetch(`${CLOB_BASE}/markets/${conditionId}`)
+      if (!resp.ok) return null
+      const market = (await resp.json()) as {
+        tokens?: Array<{ token_id: string; outcome: string }>
+      }
+      const noToken = market.tokens?.find(
+        (t) => t.token_id !== yesTokenId && t.outcome?.toLowerCase() === 'no',
+      )
+      return noToken?.token_id ?? null
+    } catch {
+      return null
+    }
+  }
+
+  // Dispatches a closing sell for a fill whose hedge was previously skipped or
+  // failed. Ask-side fills used buy-NO at order time, so we sell NO to close;
+  // bid-side fills bought YES, so we sell YES. Both are token sells — no USDC
+  // spending — which is why these can proceed even at low wallet balances.
+  async retryHedge(fill: RealFillRow, tokenId: string, noTokenId?: string): Promise<void> {
+    if (!this.hedgeRetryAllowed()) {
+      this.logger.debug(`retryHedge: real execution disabled — fill ${fill.id} stays skipped`)
+      return
+    }
+
+    const useNoSell = fill.side === 'ask' && !!noTokenId
+    const realTokenId = useNoSell ? noTokenId! : tokenId
+    const realHedgePrice = useNoSell ? 1 - fill.hedgePrice : fill.hedgePrice
+    const hedgeAmount = fill.size
+    const notional = realHedgePrice * fill.size
+
+    if (notional > this.maxNotional) {
+      this.logger.warn(
+        `retryHedge: notional $${notional.toFixed(2)} > max — fill ${fill.id} skipped`,
+      )
+      return
+    }
+
+    let hedgeOrderId: string | null = null
+    let hedgeStatus: RealFillRow['hedgeStatus'] = 'failed'
+    let txHash: string | null = null
+
+    try {
+      const resp = await this.getClient().createAndPostMarketOrder(
+        {
+          tokenID: realTokenId,
+          amount: hedgeAmount,
+          side: Side.SELL,
+          price: realHedgePrice,
+        },
+        undefined,
+        OrderType.FOK,
+      )
+      const r = resp as Record<string, unknown>
+      if (!r['success']) {
+        throw new Error(String(r['errorMsg'] ?? r['error'] ?? 'Polymarket rejected hedge retry'))
+      }
+      hedgeOrderId = String(r['orderID'] ?? r['id'] ?? fill.id)
+      const hashes = r['transactionsHashes'] as string[] | undefined
+      txHash = hashes?.[0] ?? null
+      hedgeStatus = 'done'
+      this.logger.log(`retryHedge done for fill ${fill.id}: hedge order ${hedgeOrderId}`)
+    } catch (err) {
+      this.logger.error(
+        `retryHedge failed for fill ${fill.id}: ${err instanceof Error ? err.message : String(err)}`,
+      )
+    }
+
+    await this.fillRepo.updateHedge(fill.id, hedgeOrderId, hedgeStatus, txHash)
+
+    if (hedgeStatus === 'done') {
+      const slippageUsd = Math.abs(realHedgePrice - fill.hedgePrice) * fill.size
+      try {
+        await this.checkAndUpdateDailyLoss(slippageUsd)
+      } catch (capErr) {
+        this.logger.warn(
+          `Daily loss cap during hedge retry: ${capErr instanceof Error ? capErr.message : String(capErr)}`,
+        )
+      }
+    }
   }
 
   async onOrderPlaced(evt: OrderPlacedEvent): Promise<void> {

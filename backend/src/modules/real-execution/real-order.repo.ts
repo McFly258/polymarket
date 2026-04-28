@@ -106,6 +106,16 @@ export class RealOrderRepo {
     return r ? this.toRow(r) : null
   }
 
+  async findById(id: string): Promise<RealOrderRow | null> {
+    const r = await this.prisma.realOrder.findUnique({ where: { id } })
+    return r ? this.toRow(r) : null
+  }
+
+  async findByDecisionId(decisionId: string): Promise<RealOrderRow | null> {
+    const r = await this.prisma.realOrder.findFirst({ where: { decisionId } })
+    return r ? this.toRow(r) : null
+  }
+
   async readRecent(limit = 500): Promise<RealOrderRow[]> {
     const rows = await this.prisma.realOrder.findMany({
       orderBy: { postedAt: 'desc' },

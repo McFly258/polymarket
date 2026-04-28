@@ -77,11 +77,24 @@ export class RealFillRepo {
     id: string,
     hedgeOrderId: string | null,
     hedgeStatus: HedgeStatus,
+    txHash?: string | null,
   ): Promise<void> {
     await this.prisma.realFill.update({
       where: { id },
-      data: { hedgeOrderId, hedgeStatus },
+      data: { hedgeOrderId, hedgeStatus, ...(txHash !== undefined ? { txHash } : {}) },
     })
+  }
+
+  async readUnhedged(maxAgeMs = 7 * 24 * 60 * 60 * 1000): Promise<RealFillRow[]> {
+    const since = new Date(Date.now() - maxAgeMs)
+    const rows = await this.prisma.realFill.findMany({
+      where: {
+        hedgeStatus: { in: ['skipped', 'failed'] },
+        filledAt: { gte: since },
+      },
+      orderBy: { filledAt: 'asc' },
+    })
+    return rows.map((r) => this.toRow(r))
   }
 
   async readRecent(limit = 200): Promise<RealFillRow[]> {

@@ -137,6 +137,7 @@ export class ReconciliationService implements OnModuleInit, OnApplicationShutdow
       // We still need to track fills and update statuses while paused.
       await this.reconcileOpenOrders()
       await this.ingestOrphanTrades()
+      await this.retryUnhedgedFills()
       this.totalTicks++
     } catch (err) {
       this.lastTickError = err instanceof Error ? err.message : String(err)
@@ -286,6 +287,42 @@ export class ReconciliationService implements OnModuleInit, OnApplicationShutdow
         this.totalErrors++
         this.logger.warn(
           `insert orphan trade ${tradeId} failed: ${err instanceof Error ? err.message : String(err)}`,
+        )
+      }
+    }
+  }
+
+  private async retryUnhedgedFills(): Promise<void> {
+    const fills = await this.fillRepo.readUnhedged()
+    if (fills.length === 0) return
+    this.logger.log(`retryUnhedgedFills: ${fills.length} fill(s) to retry`)
+    // Cap at 10 per tick so a backlog doesn't hold up the rest of the reconciler.
+    const batch = fills.slice(0, 10)
+    for (const fill of batch) {
+      try {
+        // Resolve tokenId: primary path via decisionId, fallback via realOrderId.
+        const order =
+          (await this.orderRepo.findByDecisionId(fill.decisionId)) ??
+          (await this.orderRepo.findById(fill.realOrderId))
+        const tokenId = order?.tokenId
+        if (!tokenId) {
+          this.logger.warn(`retryUnhedgedFills: no tokenId for fill ${fill.id}, skipping`)
+          continue
+        }
+        // Ask-side fills need noTokenId to sell the NO tokens held in real wallet.
+        let noTokenId: string | undefined
+        if (fill.side === 'ask' && fill.conditionId) {
+          noTokenId = (await this.broker.getNoTokenId(fill.conditionId, tokenId)) ?? undefined
+          if (!noTokenId) {
+            this.logger.warn(
+              `retryUnhedgedFills: could not resolve noTokenId for ask fill ${fill.id} (condition ${fill.conditionId})`,
+            )
+          }
+        }
+        await this.broker.retryHedge(fill, tokenId, noTokenId)
+      } catch (err) {
+        this.logger.warn(
+          `retryUnhedgedFills error for fill ${fill.id}: ${err instanceof Error ? err.message : String(err)}`,
         )
       }
     }
