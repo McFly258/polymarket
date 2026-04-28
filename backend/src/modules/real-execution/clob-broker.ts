@@ -1,5 +1,5 @@
 import { Injectable, Logger, OnApplicationShutdown, OnModuleInit } from '@nestjs/common'
-import { ClobClient, Chain, AssetType, OrderType, Side } from '@polymarket/clob-client'
+import { ClobClient, Chain, AssetType, OrderType, Side } from '@polymarket/clob-client-v2'
 import { createWalletClient, http } from 'viem'
 import { privateKeyToAccount } from 'viem/accounts'
 import { polygon } from 'viem/chains'
@@ -241,14 +241,14 @@ export class ClobBroker implements OnModuleInit, OnApplicationShutdown {
       chain: polygon,
       transport: http(),
     })
-    this._client = new ClobClient(
-      CLOB_BASE,
-      Chain.POLYGON,
-      walletClient,
-      { key: this.apiKey, secret: this.apiSecret, passphrase: this.apiPassphrase },
-      this.polySignatureType,
-      this.funderAddress,
-    )
+    this._client = new ClobClient({
+      host: CLOB_BASE,
+      chain: Chain.POLYGON,
+      signer: walletClient,
+      creds: { key: this.apiKey, secret: this.apiSecret, passphrase: this.apiPassphrase },
+      signatureType: this.polySignatureType,
+      funderAddress: this.funderAddress,
+    })
     return this._client
   }
 

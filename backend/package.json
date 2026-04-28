@@ -26,7 +26,7 @@
     "@nestjs/platform-ws": "10.4.15",
     "@nestjs/swagger": "8.1.1",
     "@nestjs/websockets": "10.4.15",
-    "@polymarket/clob-client": "^5.8.1",
+    "@polymarket/clob-client-v2": "^1.0.2",
     "@prisma/client": "5.22.0",
     "@scalar/nestjs-api-reference": "0.5.4",
     "class-transformer": "0.5.1",
