@@ -285,7 +285,11 @@ export class ClobBroker implements OnModuleInit, OnApplicationShutdown {
         if (!r['success']) {
           throw new Error(String(r['errorMsg'] ?? r['error'] ?? 'Polymarket rejected order'))
         }
-        clobOrderId = String(r['orderID'] ?? r['id'] ?? clobOrderId)
+        const rawId = r['orderID'] ?? r['order_id'] ?? r['id']
+        if (!rawId) {
+          throw new Error(`CLOB accepted order but returned no order ID (resp: ${JSON.stringify(r)})`)
+        }
+        clobOrderId = String(rawId)
         status = 'accepted'
         const label = useNoBuy ? `buy-NO @ ${realPrice.toFixed(3)}` : `${paperOrder.side} @ ${realPrice.toFixed(3)}`
         this.logger.log(`CLOB order placed: ${clobOrderId} [${label}] (decision ${decisionId})`)

@@ -132,12 +132,9 @@ export class ReconciliationService implements OnModuleInit, OnApplicationShutdow
         this.totalTicks++
         return this.getStatus()
       }
-      const state = await this.stateRepo.read()
-      if (state.paused) {
-        this.totalTicks++
-        return this.getStatus()
-      }
-
+      // Reconciliation always runs regardless of pause state — pausing only
+      // prevents new order placement (handled in ClobBroker.dispatchAllowed).
+      // We still need to track fills and update statuses while paused.
       await this.reconcileOpenOrders()
       await this.ingestOrphanTrades()
       this.totalTicks++
@@ -156,8 +153,32 @@ export class ReconciliationService implements OnModuleInit, OnApplicationShutdow
   private async reconcileOpenOrders(): Promise<void> {
     const openOrders = await this.orderRepo.readOpen()
     for (const row of openOrders) {
+      // Synthetic IDs (real-paper-*) were never posted to CLOB — skip CLOB
+      // lookup and mark them rejected so they don't pollute KPIs forever.
+      if (row.id.startsWith('real-')) {
+        this.logger.warn(`order ${row.id} has synthetic ID — marking rejected`)
+        await this.orderRepo.patchReconcile(row.id, {
+          status: 'rejected',
+          closedAt: Date.now(),
+          discrepancy: 'synthetic ID — CLOB order ID was not captured at placement',
+          lastReconciledAt: Date.now(),
+        })
+        this.totalOrdersReconciled++
+        continue
+      }
       try {
         const raw = await this.broker.fetchOrder(row.id)
+        if (!raw || Object.keys(raw).length === 0) {
+          this.logger.warn(`order ${row.id} not found on CLOB — marking cancelled`)
+          await this.orderRepo.patchReconcile(row.id, {
+            status: 'cancelled',
+            closedAt: Date.now(),
+            discrepancy: 'not found on CLOB during reconciliation',
+            lastReconciledAt: Date.now(),
+          })
+          this.totalOrdersReconciled++
+          continue
+        }
         const view = this.parseClobOrder(raw)
         await this.applyOrderPatch(row, view)
         this.totalOrdersReconciled++
@@ -316,12 +337,6 @@ export class ReconciliationService implements OnModuleInit, OnApplicationShutdow
       // Stay in current status. Don't flip accepted→resting artificially.
     }
 
-    // Paper already cancelled but CLOB came back with a filled order — this
-    // is the late-fill-after-drift-cancel case. Flag it so a human can check.
-    if (row.status === 'cancelled' && nextStatus === 'filled') {
-      discrepancy = discrepancy ?? 'late fill after paper cancel'
-    }
-
     // Price divergence check — only once we actually have some fill to compare
     // against. Skip pre-fill rows since avg_price is noise there.
     if (
@@ -343,6 +358,11 @@ export class ReconciliationService implements OnModuleInit, OnApplicationShutdow
       this.totalDiscrepancies++
       this.logger.warn(`order ${row.id}: ${discrepancy}`)
     }
+
+    // Fill rows are recorded exclusively by ingestOrphanTrades (which dedupes
+    // via clobTradeId). Writing fills here with clobTradeId=null would cause
+    // double-fills because the dedup check in ingestOrphanTrades can never
+    // match a null clobTradeId against a real trade ID.
 
     await this.orderRepo.patchReconcile(row.id, {
       status: nextStatus,

@@ -17,6 +17,7 @@ import { RewardsTable } from './components/RewardsTable'
 import { MarketHistoryPanel } from './components/MarketHistoryPanel'
 import { SimulationPanel } from './components/SimulationPanel'
 import { PaperTradingPanel } from './components/PaperTradingPanel'
+import { LiveOrdersPanel } from './components/LiveOrdersPanel'
 import { getPaperEngine } from './services/paperTrading'
 
 // Re-derive the dashboard rows from the live books map at most this often. WS
@@ -221,6 +222,8 @@ function App() {
         config={strategyConfig}
         sim={sim}
       />
+
+      <LiveOrdersPanel />
 
       <FilterBar
         query={query}

@@ -45,6 +45,7 @@ function toOrder(o: ServerOrderRow): PhantomOrder {
   return {
     id: o.id, conditionId: o.conditionId, tokenId: o.tokenId, outcome: o.outcome,
     side: o.side, price: o.price, size: o.size, postedAt: o.postedAt, status: o.status,
+    closedAt: o.closedAt,
     postedBestBid: o.postedBestBid, postedBestAsk: o.postedBestAsk,
   }
 }
@@ -90,6 +91,53 @@ export interface CapitalPoint {
   totalCapitalUsd: number
 }
 
+export type RealOrderStatus =
+  | 'pending' | 'accepted' | 'resting' | 'partial'
+  | 'filled' | 'cancelled' | 'rejected' | 'skipped'
+
+export interface RealOrderRow {
+  id: string
+  decisionId: string
+  paperOrderId: string
+  conditionId: string
+  tokenId: string
+  outcome: string
+  side: 'bid' | 'ask'
+  price: number
+  size: number
+  filledSize: number
+  status: RealOrderStatus
+  rejectReason: string | null
+  postedAt: number
+  closedAt: number | null
+  txHash: string | null
+  lastReconciledAt: number | null
+  discrepancy: string | null
+}
+
+export interface RealFillRow {
+  id: string
+  decisionId: string
+  conditionId: string
+  question: string
+  side: 'bid' | 'ask'
+  fillPrice: number
+  size: number
+  realisedPnlUsd: number
+  makerFeeUsd: number
+  takerFeeUsd: number
+  filledAt: number
+  txHash: string | null
+  source: 'paper' | 'reconciler'
+}
+
+export interface RealBalanceDto {
+  balanceUsdc: number
+  minBalanceUsdc: number
+  sufficient: boolean
+  enabled: boolean
+}
+
 export interface BackendEngineClient {
   snapshot(): EngineSnapshot
   subscribe(fn: () => void): () => void
@@ -102,6 +150,9 @@ export interface BackendEngineClient {
   fetchPositionRewardHistory(conditionId?: string, limit?: number): Promise<PositionRewardHourlyPoint[]>
   fetchCapitalHistory(limit?: number): Promise<CapitalPoint[]>
   fetchFillsHistory(limit?: number): Promise<FillEvent[]>
+  fetchRealOrders(limit?: number): Promise<RealOrderRow[]>
+  fetchRealFills(limit?: number): Promise<RealFillRow[]>
+  fetchRealBalance(): Promise<RealBalanceDto>
 }
 
 function emptySnapshot(): EngineSnapshot {
@@ -188,6 +239,24 @@ class BackendEngineClientImpl implements BackendEngineClient {
     if (!res.ok) throw new Error(`fills-history ${res.status}`)
     const rows = (await res.json()) as ServerFillRow[]
     return rows.map(toFill)
+  }
+
+  async fetchRealOrders(limit = 100): Promise<RealOrderRow[]> {
+    const res = await fetch(`${BASE}/admin/real/orders?limit=${limit}`)
+    if (!res.ok) throw new Error(`real/orders ${res.status}`)
+    return (await res.json()) as RealOrderRow[]
+  }
+
+  async fetchRealFills(limit = 100): Promise<RealFillRow[]> {
+    const res = await fetch(`${BASE}/admin/real/fills?limit=${limit}`)
+    if (!res.ok) throw new Error(`real/fills ${res.status}`)
+    return (await res.json()) as RealFillRow[]
+  }
+
+  async fetchRealBalance(): Promise<RealBalanceDto> {
+    const res = await fetch(`${BASE}/admin/real/balance`)
+    if (!res.ok) throw new Error(`real/balance ${res.status}`)
+    return (await res.json()) as RealBalanceDto
   }
 
   private async poll(): Promise<void> {

@@ -195,6 +195,12 @@ function allocateMarket(
   const minFloor = config.minPriceFloor ?? DEFAULT_STRATEGY.minPriceFloor ?? 0
   if (minFloor > 0 && yesBook.bestBid < minFloor) return null
 
+  // C7 parity — binary-extreme exclusion. Engine rejects markets outside [0.20, 0.80]
+  // mid at placement time; pre-filter here so the simulator doesn't allocate budget
+  // to markets it can never actually trade.
+  const mid0 = yesBook.mid
+  if (mid0 < 0.20 || mid0 > 0.80) return null
+
   // Risk criterion #2 — min hedge-side depth. The YES bid book is the hedge
   // venue when our resting bid fills (we sell to flatten); the YES ask book is
   // the hedge venue when our resting ask fills (we buy to flatten). Require

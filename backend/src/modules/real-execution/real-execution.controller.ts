@@ -3,8 +3,9 @@ import { Controller, Get, Post, Logger } from '@nestjs/common'
 import { FillRepo } from '../persistence/fill.repo'
 
 import { ClobBroker, type BalanceSnapshot } from './clob-broker'
-import { RealFillRepo } from './real-fill.repo'
-import { RealOrderRepo } from './real-order.repo'
+import { RealFillRepo, type RealFillRow } from './real-fill.repo'
+import { RealOrderRepo, type RealOrderRow } from './real-order.repo'
+import { RealPositionRepo, type RealPositionRow } from './real-position.repo'
 import { RealStateRepo } from './real-state.repo'
 import {
   ReconciliationService,
@@ -46,6 +47,7 @@ export class RealExecutionController {
     private readonly stateRepo: RealStateRepo,
     private readonly realFillRepo: RealFillRepo,
     private readonly realOrderRepo: RealOrderRepo,
+    private readonly realPositionRepo: RealPositionRepo,
     private readonly reconciler: ReconciliationService,
     private readonly fillRepo: FillRepo,
     private readonly broker: ClobBroker,
@@ -99,6 +101,16 @@ export class RealExecutionController {
   async reconcileRun(): Promise<ReconciliationStatus> {
     this.logger.log('Reconciler force-run requested via API')
     return this.reconciler.runOnce()
+  }
+
+  @Get('admin/real/orders')
+  async recentOrders(): Promise<RealOrderRow[]> {
+    return this.realOrderRepo.readRecent(100)
+  }
+
+  @Get('admin/real/fills')
+  async recentFills(): Promise<RealFillRow[]> {
+    return this.realFillRepo.readRecent(100)
   }
 
   @Get('admin/real/discrepancies')

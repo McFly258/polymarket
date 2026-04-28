@@ -47,6 +47,7 @@ export interface PhantomOrder {
   size: number
   postedAt: number
   status: 'resting' | 'filled' | 'cancelled'
+  closedAt?: number | null
   // Snapshot of the book state at posting time — used as a sanity reference
   // when reasoning about adverse moves.
   postedBestBid: number | null
