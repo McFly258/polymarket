@@ -2,7 +2,7 @@ import { Injectable } from '@nestjs/common'
 
 import { PrismaService } from '../prisma/prisma.service'
 
-export type HedgeStatus = 'pending' | 'done' | 'failed' | 'skipped'
+export type HedgeStatus = 'pending' | 'done' | 'failed' | 'skipped' | 'not-applicable'
 
 // 'paper'     — fill inserted synchronously from an ORDER_FILLED engine event.
 // 'reconciler' — fill inserted by the reconciliation poller after seeing a CLOB
@@ -91,6 +91,11 @@ export class RealFillRepo {
       where: {
         hedgeStatus: { in: ['skipped', 'failed'] },
         filledAt: { gte: since },
+        // Only retry fills tied to a confirmed on-chain CLOB trade.
+        // Fills with clobTradeId=null came from paper-engine skips or backfills
+        // where no tokens ever landed in the wallet — retrying would always fail
+        // with "balance: 0".
+        clobTradeId: { not: null },
       },
       orderBy: { filledAt: 'asc' },
     })
