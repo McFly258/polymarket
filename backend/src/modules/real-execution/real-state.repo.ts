@@ -8,6 +8,7 @@ export interface RealExecutionStateRow {
   pauseReason: string | null
   dailyLossUsd: number
   dailyLossDayUtc: string | null
+  walletSyncCursorAt: number | null
   updatedAt: number
 }
 
@@ -21,28 +22,43 @@ export class RealStateRepo {
       create: { id: 1 },
       update: {},
     })
-    return {
-      enabled: r.enabled,
-      paused: r.paused,
-      pauseReason: r.pauseReason,
-      dailyLossUsd: r.dailyLossUsd,
-      dailyLossDayUtc: r.dailyLossDayUtc,
-      updatedAt: r.updatedAt.getTime(),
-    }
+    return this.toRow(r)
   }
 
   async write(patch: Partial<Omit<RealExecutionStateRow, 'updatedAt'>>): Promise<RealExecutionStateRow> {
+    const dbPatch = {
+      ...patch,
+      walletSyncCursorAt:
+        patch.walletSyncCursorAt !== undefined
+          ? patch.walletSyncCursorAt === null
+            ? null
+            : new Date(patch.walletSyncCursorAt)
+          : undefined,
+    }
     const r = await this.prisma.realExecutionState.upsert({
       where: { id: 1 },
-      create: { id: 1, ...patch },
-      update: patch,
+      create: { id: 1, ...dbPatch },
+      update: dbPatch,
     })
+    return this.toRow(r)
+  }
+
+  private toRow(r: {
+    enabled: boolean
+    paused: boolean
+    pauseReason: string | null
+    dailyLossUsd: number
+    dailyLossDayUtc: string | null
+    walletSyncCursorAt: Date | null
+    updatedAt: Date
+  }): RealExecutionStateRow {
     return {
       enabled: r.enabled,
       paused: r.paused,
       pauseReason: r.pauseReason,
       dailyLossUsd: r.dailyLossUsd,
       dailyLossDayUtc: r.dailyLossDayUtc,
+      walletSyncCursorAt: r.walletSyncCursorAt ? r.walletSyncCursorAt.getTime() : null,
       updatedAt: r.updatedAt.getTime(),
     }
   }

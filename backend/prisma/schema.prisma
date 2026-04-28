@@ -225,13 +225,17 @@ model RealCapitalSample {
 }
 
 model RealExecutionState {
-  id              Int      @id @default(1)
-  enabled         Boolean  @default(false)
-  paused          Boolean  @default(false)
-  pauseReason     String?  @map("pause_reason")
-  dailyLossUsd    Float    @default(0) @map("daily_loss_usd")
-  dailyLossDayUtc String?  @map("daily_loss_day_utc")
-  updatedAt       DateTime @updatedAt @map("updated_at")
+  id              Int       @id @default(1)
+  enabled         Boolean   @default(false)
+  paused          Boolean   @default(false)
+  pauseReason     String?   @map("pause_reason")
+  dailyLossUsd    Float     @default(0) @map("daily_loss_usd")
+  dailyLossDayUtc String?   @map("daily_loss_day_utc")
+  // Persistent cursor for wallet fill sync. Advances after each successful
+  // syncWalletFills() pass so the next run fetches only new trades. Null on
+  // first boot → defaults to WALLET_SYNC_DEFAULT_LOOKBACK_MS ago.
+  walletSyncCursorAt DateTime? @map("wallet_sync_cursor_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
 
   @@map("real_execution_state")
 }

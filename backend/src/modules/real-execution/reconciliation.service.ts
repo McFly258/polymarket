@@ -32,6 +32,14 @@ const SIZE_EPSILON = 1e-6
 // Bounded to keep cold-start / long-outage catch-ups from scanning forever.
 const MAX_TRADE_LOOKBACK_MS = 6 * 60 * 60 * 1000 // 6h
 
+// syncWalletFills runs every WALLET_SYNC_INTERVAL_TICKS reconciler ticks
+// (≈ every 5 minutes at 30s tick cadence). It uses a persistent cursor stored
+// in real_execution_state.wallet_sync_cursor_at so it survives restarts and
+// never misses trades even after extended downtime. On first boot the cursor
+// defaults to WALLET_SYNC_DEFAULT_LOOKBACK_MS ago.
+const WALLET_SYNC_INTERVAL_TICKS = 10
+const WALLET_SYNC_DEFAULT_LOOKBACK_MS = 30 * 24 * 60 * 60 * 1000 // 30 days
+
 export interface ReconciliationStatus {
   enabled: boolean
   running: boolean
@@ -126,8 +134,16 @@ export class ReconciliationService implements OnModuleInit, OnApplicationShutdow
     const startedAt = Date.now()
     this.lastTickError = null
     try {
-      // Short-circuit the whole tick when real dispatch is off or paused. We
-      // still advance totalTicks so the status view shows the loop is alive.
+      // syncWalletFills runs unconditionally — even when real execution is
+      // disabled — so the DB always reflects the true on-chain state of the
+      // wallet. It uses a persistent cursor and only fetches new trades, so it
+      // is cheap when idle. Runs on tick 0 and every WALLET_SYNC_INTERVAL_TICKS
+      // ticks thereafter.
+      if (this.totalTicks % WALLET_SYNC_INTERVAL_TICKS === 0) {
+        await this.syncWalletFills()
+      }
+      // Short-circuit order reconciliation when real dispatch is off. We still
+      // advance totalTicks so the status view shows the loop is alive.
       if (!this.broker.isEnabled()) {
         this.totalTicks++
         return this.getStatus()
@@ -325,6 +341,101 @@ export class ReconciliationService implements OnModuleInit, OnApplicationShutdow
           `retryUnhedgedFills error for fill ${fill.id}: ${err instanceof Error ? err.message : String(err)}`,
         )
       }
+    }
+  }
+
+  // Fetches all CLOB trades for the wallet from the persistent cursor forward
+  // and upserts any that are missing from real_fills. Unlike ingestOrphanTrades
+  // (which is bounded to MAX_TRADE_LOOKBACK_MS for hot-path speed), this uses a
+  // durable cursor so no fills are ever lost across restarts or extended downtime.
+  private async syncWalletFills(): Promise<void> {
+    const state = await this.stateRepo.read()
+    const sinceMs = state.walletSyncCursorAt ?? Date.now() - WALLET_SYNC_DEFAULT_LOOKBACK_MS
+
+    let trades: Array<Record<string, unknown>>
+    try {
+      trades = await this.broker.fetchTrades(sinceMs)
+    } catch (err) {
+      this.logger.warn(
+        `syncWalletFills fetchTrades failed: ${err instanceof Error ? err.message : String(err)}`,
+      )
+      return
+    }
+
+    let ingested = 0
+    for (const t of trades) {
+      const tradeId = asString(t['id']) ?? asString(t['trade_id'])
+      if (!tradeId) continue
+      if (await this.fillRepo.findByClobTradeId(tradeId)) continue
+
+      const orderId = asString(t['order_id']) ?? asString(t['maker_order_id'])
+      const price = asNumber(t['price'])
+      const size = asNumber(t['size']) ?? asNumber(t['match_size'])
+      const side = asString(t['side'])?.toLowerCase()
+      const tokenId = asString(t['asset_id']) ?? asString(t['token_id'])
+      const filledAt = asNumber(t['timestamp'])
+      if (price === null || size === null || filledAt === null) continue
+
+      let decisionId = 'wallet-sync-' + tradeId
+      let realOrderId = orderId ?? tradeId
+      let conditionId = asString(t['market']) ?? ''
+      let resolvedSide: 'bid' | 'ask' = side === 'sell' ? 'ask' : 'bid'
+
+      if (orderId) {
+        const parentOrder = await this.orderRepo.findByPaperId(orderId).catch(() => null)
+        const fallback = parentOrder ?? (await this.findOrderById(orderId))
+        if (fallback) {
+          decisionId = fallback.decisionId
+          realOrderId = fallback.id
+          conditionId = fallback.conditionId
+          resolvedSide = fallback.side
+        }
+      }
+
+      // SELL trades from our wallet are closing/hedge trades — they don't need
+      // a hedge themselves. Mark as not-applicable so retryUnhedgedFills ignores
+      // them. Only BUY trades (opening positions) need a hedge.
+      const isSell = side === 'sell'
+      const hedgeStatus = isSell ? 'not-applicable' : 'skipped'
+
+      try {
+        await this.fillRepo.insert({
+          id: `wallet-sync-${tradeId}`,
+          decisionId,
+          paperFillId: null,
+          realOrderId,
+          conditionId,
+          question: '',
+          side: resolvedSide,
+          fillPrice: price,
+          size,
+          hedgePrice: price,
+          realisedPnlUsd: 0,
+          makerFeeUsd: 0,
+          takerFeeUsd: 0,
+          filledAt: filledAt > 1e12 ? filledAt : filledAt * 1000,
+          hedgeOrderId: null,
+          hedgeStatus,
+          txHash: asString(t['transaction_hash']) ?? null,
+          clobTradeId: tradeId,
+          source: 'reconciler',
+        })
+        ingested++
+        if (tokenId) this.logger.debug(`wallet-sync ingested trade ${tradeId} token=${tokenId}`)
+      } catch (err) {
+        this.logger.warn(
+          `wallet-sync insert trade ${tradeId} failed: ${err instanceof Error ? err.message : String(err)}`,
+        )
+      }
+    }
+
+    // Advance cursor to now so next run only fetches new trades.
+    await this.stateRepo.write({ walletSyncCursorAt: Date.now() })
+    if (ingested > 0) {
+      this.logger.log(`syncWalletFills: ingested ${ingested} previously-missed fill(s)`)
+      this.totalFillsIngested += ingested
+    } else {
+      this.logger.debug(`syncWalletFills: no new fills since ${new Date(sinceMs).toISOString()}`)
     }
   }
 

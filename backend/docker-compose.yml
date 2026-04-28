@@ -27,6 +27,7 @@ services:
     image: polymarket-nest-backend:dev
     container_name: polymarket-nest-backend
     restart: unless-stopped
+    stop_grace_period: 120s
     depends_on:
       postgres:
         condition: service_healthy

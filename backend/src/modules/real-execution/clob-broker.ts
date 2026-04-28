@@ -55,7 +55,7 @@ export class ClobBroker implements OnModuleInit, OnApplicationShutdown {
     private readonly stateRepo: RealStateRepo,
   ) {}
 
-  onModuleInit(): void {
+  async onModuleInit(): Promise<void> {
     if (!this.isRealEnabled()) return
     const missing: string[] = []
     if (!this.walletPrivateKey) missing.push('CLOB_WALLET_PRIVATE_KEY')
@@ -68,6 +68,23 @@ export class ClobBroker implements OnModuleInit, OnApplicationShutdown {
       )
     }
     this.logger.log('Real execution enabled — credentials verified at startup')
+
+    // Pre-flight: clean slate before the engine resumes. This guards against
+    // stale orders / dangling inventory from a previous run (or a SIGKILL that
+    // bypassed the shutdown hook). Engine modules import after this one, so
+    // their onModuleInit fires only after these awaits resolve.
+    this.logger.log('Startup: cancelling all CLOB orders and liquidating inventory...')
+    await this.cancelAllOpenOrders('Startup').catch((err) =>
+      this.logger.error(
+        `Startup cancel failed: ${err instanceof Error ? err.message : String(err)}`,
+      ),
+    )
+    await this.liquidateAllInventory('Startup').catch((err) =>
+      this.logger.error(
+        `Startup liquidate failed: ${err instanceof Error ? err.message : String(err)}`,
+      ),
+    )
+
     this._balanceTimer = setInterval(() => {
       void this.checkBalance().catch((err) => {
         this.logger.warn(
@@ -80,10 +97,88 @@ export class ClobBroker implements OnModuleInit, OnApplicationShutdown {
     )
   }
 
-  onApplicationShutdown(): void {
+  async onApplicationShutdown(): Promise<void> {
     if (this._balanceTimer) {
       clearInterval(this._balanceTimer)
       this._balanceTimer = null
+    }
+    if (!this.isRealEnabled()) return
+    this.logger.log('Shutdown: cancelling all CLOB orders and liquidating inventory...')
+    await this.cancelAllOpenOrders('Shutdown').catch((err) =>
+      this.logger.error(
+        `Shutdown cancel failed: ${err instanceof Error ? err.message : String(err)}`,
+      ),
+    )
+    await this.liquidateAllInventory('Shutdown').catch((err) =>
+      this.logger.error(
+        `Shutdown liquidate failed: ${err instanceof Error ? err.message : String(err)}`,
+      ),
+    )
+  }
+
+  private async cancelAllOpenOrders(phase: 'Startup' | 'Shutdown'): Promise<void> {
+    const client = this.getClient()
+    const openOrders = (await client.getOpenOrders({})) as unknown as Array<Record<string, unknown>>
+    if (!openOrders.length) {
+      this.logger.log(`${phase}: no open orders on CLOB`)
+    } else {
+      this.logger.log(`${phase}: cancelling ${openOrders.length} order(s)`)
+      await client.cancelAll()
+      this.logger.log(`${phase}: all CLOB orders cancelled`)
+    }
+    // Mark DB-tracked open orders as cancelled so they don't linger as stale.
+    const dbOpen = await this.orderRepo.readOpen()
+    const now = Date.now()
+    for (const o of dbOpen) {
+      await this.orderRepo.patchReconcile(o.id, {
+        status: 'cancelled',
+        closedAt: now,
+        lastReconciledAt: now,
+      })
+    }
+  }
+
+  private async liquidateAllInventory(phase: 'Startup' | 'Shutdown'): Promise<void> {
+    const pk = this.walletPrivateKey
+    const eoa = pk ? privateKeyToAccount(pk as `0x${string}`).address : undefined
+    const userAddress = this.funderAddress ?? eoa
+    if (!userAddress) return
+
+    const resp = await fetch(
+      `https://data-api.polymarket.com/positions?user=${userAddress}&sizeThreshold=0.01`,
+    )
+    if (!resp.ok) {
+      this.logger.warn(`${phase}: positions fetch failed (${resp.status})`)
+      return
+    }
+    const positions = (await resp.json()) as Array<Record<string, unknown>>
+    const held = positions.filter((p) => Number(p['size'] ?? 0) > 0.01)
+
+    if (!held.length) {
+      this.logger.log(`${phase}: no inventory to liquidate`)
+      return
+    }
+    this.logger.log(`${phase}: liquidating ${held.length} position(s)`)
+    for (const pos of held) {
+      const tokenId = String(pos['asset_id'] ?? pos['token_id'] ?? '')
+      const size = Number(pos['size'] ?? 0)
+      const curPrice = Number(pos['curPrice'] ?? pos['price'] ?? 0.5)
+      if (!tokenId || size < 0.01) continue
+      const limitPrice = Math.max(curPrice - 0.05, 0.01)
+      try {
+        const r = (await this.getClient().createAndPostMarketOrder(
+          { tokenID: tokenId, amount: size, side: Side.SELL, price: limitPrice },
+          undefined,
+          OrderType.FOK,
+        )) as Record<string, unknown>
+        this.logger.log(
+          `${phase} sell ${tokenId.slice(0, 8)}: ${r['success'] ? 'done' : `failed — ${String(r['errorMsg'] ?? r['error'] ?? 'unknown')}`}`,
+        )
+      } catch (err) {
+        this.logger.error(
+          `${phase} liquidate ${tokenId.slice(0, 8)} failed: ${err instanceof Error ? err.message : String(err)}`,
+        )
+      }
     }
   }
 
@@ -226,24 +321,100 @@ export class ClobBroker implements OnModuleInit, OnApplicationShutdown {
 
   async fetchTrades(sinceMs: number): Promise<Array<Record<string, unknown>>> {
     const client = this.getClient()
-    // We pass a viem WalletClient which has no getAddress(); derive address from
-    // the private key directly — same key used to create the client.
+    // Polymarket sigType=2 records the funder (proxy wallet) as maker_address on
+    // trades, not the EOA derived from the private key. Filtering by EOA returns
+    // zero rows. Prefer the configured funder; fall back to the EOA only when
+    // running without a proxy (sigType=0).
     const pk = this.walletPrivateKey
-    const makerAddress = pk ? privateKeyToAccount(pk as `0x${string}`).address : undefined
-    const trades = await client.getTrades({
-      maker_address: makerAddress,
-      after: Math.floor(sinceMs / 1000).toString(),
-    })
-    // Normalize SDK Trade shape → reconciler-compatible shape.
-    // SDK uses match_time (ISO string) and maker_orders[]; reconciler expects
-    // timestamp (unix seconds), order_id, maker_order_id, token_id.
-    return trades.map((t) => ({
+    const eoa = pk ? privateKeyToAccount(pk as `0x${string}`).address : undefined
+    const userAddress = this.funderAddress ?? eoa
+
+    // CLOB SDK getTrades only filters by maker_address, so it misses trades where
+    // we were the taker (e.g. FOK closes). Combine SDK results (rich fields,
+    // CLOB trade IDs) with the data-api /trades endpoint (covers maker AND
+    // taker via proxyWallet). Dedup by transaction_hash + asset.
+    const sdkTradesRaw = await client
+      .getTrades({
+        maker_address: userAddress,
+        after: Math.floor(sinceMs / 1000).toString(),
+      })
+      .catch((err) => {
+        this.logger.warn(
+          `SDK getTrades failed: ${err instanceof Error ? err.message : String(err)}`,
+        )
+        return []
+      })
+    const sdkTrades: Array<Record<string, unknown>> = sdkTradesRaw.map((t) => ({
       ...(t as unknown as Record<string, unknown>),
       timestamp: Math.floor(new Date(t.match_time).getTime() / 1000),
       token_id: t.asset_id,
       order_id: t.maker_orders?.[0]?.order_id ?? null,
       maker_order_id: t.maker_orders?.[0]?.order_id ?? null,
     }))
+
+    const dataApiTrades = userAddress
+      ? await this.fetchDataApiTrades(userAddress, sinceMs).catch((err) => {
+          this.logger.warn(
+            `data-api fetchTrades failed: ${err instanceof Error ? err.message : String(err)}`,
+          )
+          return [] as Array<Record<string, unknown>>
+        })
+      : []
+
+    // Dedup using (transaction_hash + asset_id) — same on-chain settlement of
+    // the same outcome token is the same trade regardless of which source
+    // returned it. SDK results win when present (they carry the canonical CLOB
+    // trade id used elsewhere).
+    const seen = new Set<string>()
+    const merged: Array<Record<string, unknown>> = []
+    for (const t of [...sdkTrades, ...dataApiTrades]) {
+      const tx = asString(t['transaction_hash'])
+      const asset = asString(t['asset_id']) ?? asString(t['token_id'])
+      const key = tx && asset ? `${tx}:${asset}` : asString(t['id']) ?? asString(t['trade_id'])
+      if (!key) continue
+      if (seen.has(key)) continue
+      seen.add(key)
+      merged.push(t)
+    }
+    return merged
+  }
+
+  // Pulls trades for a wallet from data-api (covers both maker and taker
+  // sides). Used to complement the CLOB SDK which only filters by maker.
+  // Normalizes the data-api shape into the reconciler-expected fields.
+  private async fetchDataApiTrades(
+    userAddress: string,
+    sinceMs: number,
+  ): Promise<Array<Record<string, unknown>>> {
+    const url = `https://data-api.polymarket.com/trades?user=${userAddress}&limit=500`
+    const resp = await fetch(url)
+    if (!resp.ok) throw new Error(`data-api ${resp.status}`)
+    const raw = (await resp.json()) as Array<Record<string, unknown>>
+    const sinceSec = Math.floor(sinceMs / 1000)
+    const out: Array<Record<string, unknown>> = []
+    for (const r of raw) {
+      const ts = asNumber(r['timestamp'])
+      if (ts === null || ts < sinceSec) continue
+      const tx = asString(r['transactionHash'])
+      const asset = asString(r['asset'])
+      // Synthetic trade id keyed on the on-chain settlement so dedup works
+      // against the unique constraint on real_fills.clob_trade_id.
+      const id = tx && asset ? `tx-${tx}-${asset}` : tx ? `tx-${tx}` : null
+      if (!id) continue
+      out.push({
+        id,
+        trade_id: id,
+        transaction_hash: tx,
+        timestamp: ts,
+        price: r['price'],
+        size: r['size'],
+        side: asString(r['side'])?.toLowerCase() ?? null,
+        asset_id: asset,
+        token_id: asset,
+        market: r['conditionId'] ?? null,
+      })
+    }
+    return out
   }
 
   isEnabled(): boolean {
@@ -552,4 +723,17 @@ export class ClobBroker implements OnModuleInit, OnApplicationShutdown {
       }
     }
   }
+}
+
+function asNumber(v: unknown): number | null {
+  if (typeof v === 'number' && Number.isFinite(v)) return v
+  if (typeof v === 'string' && v !== '') {
+    const n = Number(v)
+    return Number.isFinite(n) ? n : null
+  }
+  return null
+}
+
+function asString(v: unknown): string | null {
+  return typeof v === 'string' && v !== '' ? v : null
 }

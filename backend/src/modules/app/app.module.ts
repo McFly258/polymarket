@@ -18,9 +18,12 @@ import { RealExecutionModule } from '../real-execution/real-execution.module'
     PersistenceModule,
     PolymarketModule,
     HealthModule,
+    // RealExecutionModule before EngineModule so its onModuleInit (cancel-all
+    // + liquidate) completes before the engine resumes and starts placing
+    // fresh orders.
+    RealExecutionModule,
     EngineModule,
     GatewayModule,
-    RealExecutionModule,
   ],
 })
 export class AppModule {}
