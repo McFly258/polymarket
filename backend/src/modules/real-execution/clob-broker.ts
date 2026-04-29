@@ -385,17 +385,19 @@ export class ClobBroker implements OnModuleInit, OnApplicationShutdown {
   // Normalizes the data-api shape into the reconciler-expected fields.
   private async fetchDataApiTrades(
     userAddress: string,
-    sinceMs: number,
+    _sinceMs: number,
   ): Promise<Array<Record<string, unknown>>> {
     const url = `https://data-api.polymarket.com/trades?user=${userAddress}&limit=500`
     const resp = await fetch(url)
     if (!resp.ok) throw new Error(`data-api ${resp.status}`)
     const raw = (await resp.json()) as Array<Record<string, unknown>>
-    const sinceSec = Math.floor(sinceMs / 1000)
     const out: Array<Record<string, unknown>> = []
     for (const r of raw) {
       const ts = asNumber(r['timestamp'])
-      if (ts === null || ts < sinceSec) continue
+      if (ts === null) continue
+      // Do not filter by sinceMs here — data-api indexing lag can exceed the
+      // cursor window and cause fills to be permanently missed. The
+      // clob_trade_id UNIQUE constraint in real_fills handles dedup.
       const tx = asString(r['transactionHash'])
       const asset = asString(r['asset'])
       // Synthetic trade id keyed on the on-chain settlement so dedup works

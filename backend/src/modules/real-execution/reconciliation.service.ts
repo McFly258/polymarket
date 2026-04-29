@@ -34,9 +34,11 @@ const SIZE_EPSILON = 1e-6
 // never misses trades even after extended downtime. On first boot the cursor
 // defaults to WALLET_SYNC_DEFAULT_LOOKBACK_MS ago.
 const WALLET_SYNC_DEFAULT_LOOKBACK_MS = 30 * 24 * 60 * 60 * 1000 // 30 days
-// Keep the cursor 5 minutes behind wall-clock so API eventual-consistency lag
-// never causes fills to be skipped permanently.
-const WALLET_SYNC_CURSOR_LAG_MS = 5 * 60 * 1000 // 5 minutes
+// Keep the cursor 60 minutes behind wall-clock. Polymarket data-api indexing
+// lag can exceed 5 min; a 60 min window ensures trades are visible before the
+// cursor advances past them. Dedup via clob_trade_id UNIQUE constraint prevents
+// re-ingestion of already-recorded fills.
+const WALLET_SYNC_CURSOR_LAG_MS = 60 * 60 * 1000 // 60 minutes
 
 export interface ReconciliationStatus {
   enabled: boolean
