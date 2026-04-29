@@ -153,6 +153,8 @@ export interface BackendEngineClient {
   fetchRealOrders(limit?: number): Promise<RealOrderRow[]>
   fetchRealFills(limit?: number): Promise<RealFillRow[]>
   fetchRealBalance(): Promise<RealBalanceDto>
+  getMode(): 'paper' | 'real'
+  setMode(mode: 'paper' | 'real'): void
 }
 
 function emptySnapshot(): EngineSnapshot {
@@ -169,10 +171,20 @@ function emptySnapshot(): EngineSnapshot {
   }
 }
 
+const MODE_STORAGE_KEY = 'pm.engine.mode'
+
+function readPersistedMode(): 'paper' | 'real' {
+  try {
+    const raw = window.localStorage.getItem(MODE_STORAGE_KEY)
+    return raw === 'real' ? 'real' : 'paper'
+  } catch { return 'paper' }
+}
+
 class BackendEngineClientImpl implements BackendEngineClient {
   private snap: EngineSnapshot = emptySnapshot()
   private listeners = new Set<() => void>()
   private error: string | null = null
+  private mode: 'paper' | 'real' = readPersistedMode()
 
   constructor() {
     void this.poll()
@@ -185,6 +197,17 @@ class BackendEngineClientImpl implements BackendEngineClient {
 
   lastError(): string | null {
     return this.error
+  }
+
+  getMode(): 'paper' | 'real' {
+    return this.mode
+  }
+
+  setMode(mode: 'paper' | 'real'): void {
+    if (this.mode === mode) return
+    this.mode = mode
+    try { window.localStorage.setItem(MODE_STORAGE_KEY, mode) } catch { /* ignore */ }
+    void this.poll()
   }
 
   subscribe(fn: () => void): () => void {
@@ -235,7 +258,7 @@ class BackendEngineClientImpl implements BackendEngineClient {
   }
 
   async fetchFillsHistory(limit = 10_000): Promise<FillEvent[]> {
-    const res = await fetch(`${BASE}/fills-history?limit=${limit}`)
+    const res = await fetch(`${BASE}/fills-history?limit=${limit}&mode=${this.mode}`)
     if (!res.ok) throw new Error(`fills-history ${res.status}`)
     const rows = (await res.json()) as ServerFillRow[]
     return rows.map(toFill)
@@ -261,7 +284,7 @@ class BackendEngineClientImpl implements BackendEngineClient {
 
   private async poll(): Promise<void> {
     try {
-      const res = await fetch(`${BASE}/state`)
+      const res = await fetch(`${BASE}/state?mode=${this.mode}`)
       if (!res.ok) {
         this.error = `state ${res.status}`
         this.notify()

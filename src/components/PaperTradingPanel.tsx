@@ -78,6 +78,10 @@ export function PaperTradingPanel({ rows, config, sim }: Props) {
   // tab closes, reloads, and EC2 process restarts. "Browser" is kept around
   // as a quick local test mode.
   const [source] = useState<EngineSource>('backend')
+  const [mode, setMode] = useState<'paper' | 'real'>(() => backendClient.getMode())
+  useEffect(() => {
+    backendClient.setMode(mode)
+  }, [backendClient, mode])
   const facade = useMemo(
     () => source === 'backend'
       ? backendFacade(backendClient, config)
@@ -151,9 +155,37 @@ export function PaperTradingPanel({ rows, config, sim }: Props) {
       <div className="panel-header">
         <div>
           <h2>
-            Paper trading{' '}
+            {mode === 'real' ? 'Real trading' : 'Paper trading'}{' '}
             <span className="dim" style={{ fontSize: '0.8rem' }}>
               ({snap.brokerKind})
+            </span>
+            <span style={{ marginLeft: 12, display: 'inline-flex', gap: 4 }}>
+              <button
+                type="button"
+                className="refresh-button"
+                style={{
+                  fontSize: '0.7rem',
+                  padding: '2px 8px',
+                  background: mode === 'paper' ? '#334155' : 'transparent',
+                  border: '1px solid #334155',
+                }}
+                onClick={() => setMode('paper')}
+              >
+                Paper
+              </button>
+              <button
+                type="button"
+                className="refresh-button"
+                style={{
+                  fontSize: '0.7rem',
+                  padding: '2px 8px',
+                  background: mode === 'real' ? '#dc2626' : 'transparent',
+                  border: '1px solid #dc2626',
+                }}
+                onClick={() => setMode('real')}
+              >
+                Real
+              </button>
             </span>
           </h2>
           <p>

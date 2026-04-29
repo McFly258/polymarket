@@ -3,6 +3,7 @@ import { Module } from '@nestjs/common'
 import { BROKER_TOKEN } from '../../domain/broker.types'
 import { PersistenceModule } from '../persistence/persistence.module'
 import { PolymarketModule } from '../polymarket/polymarket.module'
+import { RealExecutionModule } from '../real-execution/real-execution.module'
 
 import { EngineAllocService } from './engine-alloc.service'
 import { EngineDataService } from './engine-data.service'
@@ -13,7 +14,7 @@ import { EngineController } from './engine.controller'
 import { PaperBroker } from './paper-broker'
 
 @Module({
-  imports: [PersistenceModule, PolymarketModule],
+  imports: [PersistenceModule, PolymarketModule, RealExecutionModule],
   controllers: [EngineController],
   providers: [
     {
