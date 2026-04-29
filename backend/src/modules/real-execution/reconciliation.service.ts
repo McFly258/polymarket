@@ -34,6 +34,9 @@ const SIZE_EPSILON = 1e-6
 // never misses trades even after extended downtime. On first boot the cursor
 // defaults to WALLET_SYNC_DEFAULT_LOOKBACK_MS ago.
 const WALLET_SYNC_DEFAULT_LOOKBACK_MS = 30 * 24 * 60 * 60 * 1000 // 30 days
+// Keep the cursor 5 minutes behind wall-clock so API eventual-consistency lag
+// never causes fills to be skipped permanently.
+const WALLET_SYNC_CURSOR_LAG_MS = 5 * 60 * 1000 // 5 minutes
 
 export interface ReconciliationStatus {
   enabled: boolean
@@ -367,8 +370,10 @@ export class ReconciliationService implements OnModuleInit, OnApplicationShutdow
       }
     }
 
-    // Advance cursor to now so next run only fetches new trades.
-    await this.stateRepo.write({ walletSyncCursorAt: Date.now() })
+    // Advance cursor to 5 minutes behind now. The CLOB/data-api can reflect
+    // fills with a delay; if we advance to Date.now() immediately we can race
+    // past a fill before it becomes visible and lose it permanently.
+    await this.stateRepo.write({ walletSyncCursorAt: Date.now() - WALLET_SYNC_CURSOR_LAG_MS })
     if (ingested > 0) {
       this.logger.log(`syncWalletFills: ingested ${ingested} previously-missed fill(s)`)
       this.totalFillsIngested += ingested
