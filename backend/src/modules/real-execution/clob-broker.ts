@@ -508,7 +508,7 @@ export class ClobBroker implements OnModuleInit, OnApplicationShutdown {
   }
 
   async onOrderPlaced(evt: OrderPlacedEvent): Promise<void> {
-    const { decisionId, paperOrder, noTokenId } = evt
+    const { decisionId, paperOrder, noTokenId, rewardMinSize } = evt
     const postedAt = paperOrder.postedAt
     // Ask-side orders are flipped to buy-NO when noTokenId is available:
     // sell YES @ P ≡ buy NO @ (1-P) — both require only USDC, no inventory.
@@ -538,6 +538,10 @@ export class ClobBroker implements OnModuleInit, OnApplicationShutdown {
       if (cappedSize < CLOB_MIN_SIZE) {
         status = 'rejected'
         rejectReason = `size ${cappedSize} < CLOB minimum ${CLOB_MIN_SIZE} after notional cap`
+        this.logger.warn(`onOrderPlaced rejected: ${rejectReason} (decision ${decisionId})`)
+      } else if (cappedSize < rewardMinSize) {
+        status = 'rejected'
+        rejectReason = `size ${cappedSize} < reward minimum ${rewardMinSize} — dead capital`
         this.logger.warn(`onOrderPlaced rejected: ${rejectReason} (decision ${decisionId})`)
       } else {
         try {

@@ -295,8 +295,8 @@ export class EngineAllocService {
     }
     await this.orderRepo.insert(bidOrder)
     await this.orderRepo.insert(askOrder)
-    this.events.emit(ENGINE_EVENT.ORDER_PLACED, { decisionId, paperOrder: bidOrder } satisfies OrderPlacedEvent)
-    this.events.emit(ENGINE_EVENT.ORDER_PLACED, { decisionId, paperOrder: askOrder, noTokenId: noBook?.tokenId } satisfies OrderPlacedEvent)
+    this.events.emit(ENGINE_EVENT.ORDER_PLACED, { decisionId, paperOrder: bidOrder, rewardMinSize: alloc.minSize } satisfies OrderPlacedEvent)
+    this.events.emit(ENGINE_EVENT.ORDER_PLACED, { decisionId, paperOrder: askOrder, noTokenId: noBook?.tokenId, rewardMinSize: alloc.minSize } satisfies OrderPlacedEvent)
 
     const pos: InternalPosition = {
       conditionId: alloc.conditionId,

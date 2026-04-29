@@ -18,6 +18,9 @@ export interface OrderPlacedEvent {
   // NO token companion — present on ask-side orders so the CLOB broker can
   // dispatch buy-NO instead of sell-YES (USDC-only, no inventory required).
   noTokenId?: string
+  // Polymarket reward program minimum size for this market. Orders below this
+  // threshold earn no LP rewards — deploying capital there is wasteful.
+  rewardMinSize: number
 }
 
 export interface OrderCancelledEvent {
