@@ -539,9 +539,11 @@ export class ClobBroker implements OnModuleInit, OnApplicationShutdown {
         status = 'rejected'
         rejectReason = `size ${cappedSize} < CLOB minimum ${CLOB_MIN_SIZE} after notional cap`
         this.logger.warn(`onOrderPlaced rejected: ${rejectReason} (decision ${decisionId})`)
-      } else if (cappedSize < rewardMinSize) {
+      } else if (notional > this.maxNotional && cappedSize < rewardMinSize) {
+        // Only block dead capital when the notional cap itself shrank the order below reward minimum.
+        // If the paper engine natively sized below rewardMinSize, let it through — that's the engine's call.
         status = 'rejected'
-        rejectReason = `size ${cappedSize} < reward minimum ${rewardMinSize} — dead capital`
+        rejectReason = `size capped to ${cappedSize} < reward minimum ${rewardMinSize} — dead capital after cap`
         this.logger.warn(`onOrderPlaced rejected: ${rejectReason} (decision ${decisionId})`)
       } else {
         try {
