@@ -9,6 +9,7 @@ import { ClobBroker } from './clob-broker'
 import type { RealOrderRow } from './real-order.repo'
 import { RealOrderRepo } from './real-order.repo'
 import { RealFillRepo } from './real-fill.repo'
+import { RealPositionRepo } from './real-position.repo'
 import { RealStateRepo } from './real-state.repo'
 
 // Every RECONCILE_TICK_MS we poll the CLOB for each still-live real order and
@@ -28,16 +29,10 @@ const PRICE_DIV_THRESHOLD = 0.01
 // decimal math can leave ~1e-9 residue on "fully filled" orders.
 const SIZE_EPSILON = 1e-6
 
-// Upper bound on how far back we'll ask the CLOB for trades on a single tick.
-// Bounded to keep cold-start / long-outage catch-ups from scanning forever.
-const MAX_TRADE_LOOKBACK_MS = 6 * 60 * 60 * 1000 // 6h
-
-// syncWalletFills runs every WALLET_SYNC_INTERVAL_TICKS reconciler ticks
-// (≈ every 5 minutes at 30s tick cadence). It uses a persistent cursor stored
-// in real_execution_state.wallet_sync_cursor_at so it survives restarts and
+// syncWalletFills runs every reconciler tick using a persistent cursor stored
+// in real_execution_state.wallet_sync_cursor_at, so it survives restarts and
 // never misses trades even after extended downtime. On first boot the cursor
 // defaults to WALLET_SYNC_DEFAULT_LOOKBACK_MS ago.
-const WALLET_SYNC_INTERVAL_TICKS = 10
 const WALLET_SYNC_DEFAULT_LOOKBACK_MS = 30 * 24 * 60 * 60 * 1000 // 30 days
 
 export interface ReconciliationStatus {
@@ -81,6 +76,7 @@ export class ReconciliationService implements OnModuleInit, OnApplicationShutdow
     private readonly orderRepo: RealOrderRepo,
     private readonly fillRepo: RealFillRepo,
     private readonly stateRepo: RealStateRepo,
+    private readonly positionRepo: RealPositionRepo,
   ) {}
 
   onModuleInit(): void {
@@ -134,14 +130,10 @@ export class ReconciliationService implements OnModuleInit, OnApplicationShutdow
     const startedAt = Date.now()
     this.lastTickError = null
     try {
-      // syncWalletFills runs unconditionally — even when real execution is
-      // disabled — so the DB always reflects the true on-chain state of the
-      // wallet. It uses a persistent cursor and only fetches new trades, so it
-      // is cheap when idle. Runs on tick 0 and every WALLET_SYNC_INTERVAL_TICKS
-      // ticks thereafter.
-      if (this.totalTicks % WALLET_SYNC_INTERVAL_TICKS === 0) {
-        await this.syncWalletFills()
-      }
+      // syncWalletFills runs every tick using a durable cursor — cheap when idle,
+      // guaranteed not to miss fills due to eventual-consistency delays on the CLOB.
+      await this.syncWalletFills()
+      await this.rebuildPositions()
       // Short-circuit order reconciliation when real dispatch is off. We still
       // advance totalTicks so the status view shows the loop is alive.
       if (!this.broker.isEnabled()) {
@@ -152,7 +144,6 @@ export class ReconciliationService implements OnModuleInit, OnApplicationShutdow
       // prevents new order placement (handled in ClobBroker.dispatchAllowed).
       // We still need to track fills and update statuses while paused.
       await this.reconcileOpenOrders()
-      await this.ingestOrphanTrades()
       await this.retryUnhedgedFills()
       this.totalTicks++
     } catch (err) {
@@ -170,9 +161,9 @@ export class ReconciliationService implements OnModuleInit, OnApplicationShutdow
   private async reconcileOpenOrders(): Promise<void> {
     const openOrders = await this.orderRepo.readOpen()
     for (const row of openOrders) {
-      // Synthetic IDs (real-paper-*) were never posted to CLOB — skip CLOB
+      // Synthetic IDs (prepost-*) were never posted to CLOB — skip CLOB
       // lookup and mark them rejected so they don't pollute KPIs forever.
-      if (row.id.startsWith('real-')) {
+      if (row.id.startsWith('prepost-')) {
         this.logger.warn(`order ${row.id} has synthetic ID — marking rejected`)
         await this.orderRepo.patchReconcile(row.id, {
           status: 'rejected',
@@ -203,106 +194,6 @@ export class ReconciliationService implements OnModuleInit, OnApplicationShutdow
         this.totalErrors++
         this.logger.warn(
           `reconcile order ${row.id} failed: ${err instanceof Error ? err.message : String(err)}`,
-        )
-      }
-    }
-  }
-
-  private async ingestOrphanTrades(): Promise<void> {
-    const lastTs = await this.orderRepo.lastReconciledAt()
-    const sinceMs = Math.max(
-      lastTs ?? Date.now() - MAX_TRADE_LOOKBACK_MS,
-      Date.now() - MAX_TRADE_LOOKBACK_MS,
-    )
-    let trades: Array<Record<string, unknown>>
-    try {
-      trades = await this.broker.fetchTrades(sinceMs)
-    } catch (err) {
-      this.totalErrors++
-      this.logger.warn(
-        `fetchTrades failed: ${err instanceof Error ? err.message : String(err)}`,
-      )
-      return
-    }
-
-    for (const t of trades) {
-      const tradeId = asString(t['id']) ?? asString(t['trade_id'])
-      if (!tradeId) continue
-      // Dedup — if we already ingested this trade on a prior tick or recorded
-      // it synchronously from an ORDER_FILLED event, skip.
-      if (await this.fillRepo.findByClobTradeId(tradeId)) continue
-
-      const orderId = asString(t['order_id']) ?? asString(t['maker_order_id'])
-      const price = asNumber(t['price'])
-      const size = asNumber(t['size']) ?? asNumber(t['match_size'])
-      const side = asString(t['side'])?.toLowerCase()
-      const tokenId = asString(t['asset_id']) ?? asString(t['token_id'])
-      const filledAt = asNumber(t['timestamp'])
-      if (price === null || size === null || filledAt === null) continue
-
-      // Find paper-side context via the order. When orderId maps to a known
-      // real_order, we inherit decisionId + conditionId + question from it.
-      let decisionId = 'orphan-' + tradeId
-      let realOrderId = orderId ?? tradeId
-      let conditionId = asString(t['market']) ?? ''
-      const question = ''
-      let resolvedSide: 'bid' | 'ask' = side === 'sell' ? 'ask' : 'bid'
-
-      if (orderId) {
-        const parentOrder = await this.orderRepo.findByPaperId(orderId).catch(() => null)
-        const fallback = parentOrder ?? (await this.findOrderById(orderId))
-        if (fallback) {
-          decisionId = fallback.decisionId
-          realOrderId = fallback.id
-          conditionId = fallback.conditionId
-          resolvedSide = fallback.side
-        }
-      }
-
-      try {
-        await this.fillRepo.insert({
-          id: `recon-${tradeId}`,
-          decisionId,
-          paperFillId: null,
-          realOrderId,
-          conditionId,
-          question,
-          side: resolvedSide,
-          fillPrice: price,
-          size,
-          hedgePrice: price,
-          realisedPnlUsd: 0,
-          makerFeeUsd: 0,
-          takerFeeUsd: 0,
-          filledAt: filledAt > 1e12 ? filledAt : filledAt * 1000,
-          hedgeOrderId: null,
-          hedgeStatus: 'skipped',
-          txHash: asString(t['transaction_hash']) ?? null,
-          clobTradeId: tradeId,
-          source: 'reconciler',
-        })
-        this.totalFillsIngested++
-        // Ensure the associated order carries a discrepancy marker since paper
-        // never emitted the fill. Best-effort — if no matching order, move on.
-        if (orderId) {
-          const parentOrder = await this.findOrderById(orderId)
-          if (parentOrder && parentOrder.discrepancy === null) {
-            await this.orderRepo.patchReconcile(parentOrder.id, {
-              discrepancy: `reconciler-sourced fill ${tradeId}`,
-              lastReconciledAt: Date.now(),
-            })
-            this.totalDiscrepancies++
-          }
-        }
-        // Token context is recorded in logs only — schema already has tokenId
-        // on real_orders, not on real_fills (fills inherit via the join).
-        if (tokenId) {
-          this.logger.debug(`orphan trade ${tradeId} token=${tokenId}`)
-        }
-      } catch (err) {
-        this.totalErrors++
-        this.logger.warn(
-          `insert orphan trade ${tradeId} failed: ${err instanceof Error ? err.message : String(err)}`,
         )
       }
     }
@@ -344,10 +235,57 @@ export class ReconciliationService implements OnModuleInit, OnApplicationShutdow
     }
   }
 
+  // Recomputes real_positions from all real_fills with a confirmed clobTradeId.
+  // Runs after every syncWalletFills so positions always reflect on-chain reality.
+  private async rebuildPositions(): Promise<void> {
+    const allFills = await this.fillRepo.readAll(50_000)
+    const realFills = allFills.filter((f) => f.clobTradeId !== null)
+    if (realFills.length === 0) return
+
+    const byCondition = new Map<string, typeof realFills>()
+    for (const f of realFills) {
+      const arr = byCondition.get(f.conditionId) ?? []
+      arr.push(f)
+      byCondition.set(f.conditionId, arr)
+    }
+
+    for (const [conditionId, fills] of byCondition) {
+      const bidFills = fills.filter((f) => f.side === 'bid')
+      const askFills = fills.filter((f) => f.side === 'ask')
+      const bidSize = bidFills.reduce((s, f) => s + f.size, 0)
+      const askSize = askFills.reduce((s, f) => s + f.size, 0)
+      const bidPrice =
+        bidSize > 0 ? bidFills.reduce((s, f) => s + f.fillPrice * f.size, 0) / bidSize : 0
+      const askPrice =
+        askSize > 0 ? askFills.reduce((s, f) => s + f.fillPrice * f.size, 0) / askSize : 0
+
+      const latest = fills.reduce((a, b) => (a.filledAt > b.filledAt ? a : b))
+      const order =
+        (await this.orderRepo.findById(latest.realOrderId).catch(() => null)) ??
+        (await this.orderRepo.findByDecisionId(latest.decisionId).catch(() => null))
+
+      await this.positionRepo.upsert({
+        conditionId,
+        decisionId: latest.decisionId,
+        question: latest.question,
+        tokenId: order?.tokenId ?? '',
+        outcome: order?.outcome ?? '',
+        bidOrderId: bidFills.length > 0 ? bidFills[bidFills.length - 1].realOrderId : null,
+        askOrderId: askFills.length > 0 ? askFills[askFills.length - 1].realOrderId : null,
+        bidPrice,
+        askPrice,
+        bidSize,
+        askSize,
+        capitalUsd: bidSize * bidPrice + askSize * askPrice,
+        updatedAt: Date.now(),
+      })
+    }
+  }
+
   // Fetches all CLOB trades for the wallet from the persistent cursor forward
-  // and upserts any that are missing from real_fills. Unlike ingestOrphanTrades
-  // (which is bounded to MAX_TRADE_LOOKBACK_MS for hot-path speed), this uses a
-  // durable cursor so no fills are ever lost across restarts or extended downtime.
+  // and upserts any that are missing from real_fills. Uses a durable cursor in
+  // real_execution_state.wallet_sync_cursor_at so no fills are ever lost across
+  // restarts or extended downtime.
   private async syncWalletFills(): Promise<void> {
     const state = await this.stateRepo.read()
     const sinceMs = state.walletSyncCursorAt ?? Date.now() - WALLET_SYNC_DEFAULT_LOOKBACK_MS
@@ -507,10 +445,10 @@ export class ReconciliationService implements OnModuleInit, OnApplicationShutdow
       this.logger.warn(`order ${row.id}: ${discrepancy}`)
     }
 
-    // Fill rows are recorded exclusively by ingestOrphanTrades (which dedupes
+    // Fill rows are recorded exclusively by syncWalletFills (which dedupes
     // via clobTradeId). Writing fills here with clobTradeId=null would cause
-    // double-fills because the dedup check in ingestOrphanTrades can never
-    // match a null clobTradeId against a real trade ID.
+    // double-fills because the dedup check can never match a null clobTradeId
+    // against a real trade ID.
 
     await this.orderRepo.patchReconcile(row.id, {
       status: nextStatus,

@@ -138,9 +138,11 @@ export class RealExecutionController {
       this.realFillRepo.readAll(10_000),
     ])
 
-    // Index real fills by decisionId for quick lookup
-    const realByDecision = new Map<string, (typeof realFills)[0]>()
-    for (const rf of realFills) {
+    // Only count fills that have a confirmed on-chain trade ID; source='paper'
+    // synthetic mirrors have clobTradeId=null and must not pollute the comparison.
+    const realFillsActual = realFills.filter((rf) => rf.clobTradeId !== null)
+    const realByDecision = new Map<string, (typeof realFillsActual)[0]>()
+    for (const rf of realFillsActual) {
       realByDecision.set(rf.decisionId, rf)
     }
 
@@ -175,7 +177,7 @@ export class RealExecutionController {
     }
 
     // Also include real fills that have no paper counterpart (orphans)
-    for (const rf of realFills) {
+    for (const rf of realFillsActual) {
       if (!rows.find((r) => r.decisionId === rf.decisionId)) {
         rows.push({
           decisionId: rf.decisionId,

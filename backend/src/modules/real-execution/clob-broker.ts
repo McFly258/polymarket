@@ -519,7 +519,7 @@ export class ClobBroker implements OnModuleInit, OnApplicationShutdown {
     const notional = realPrice * paperOrder.size
     const dispatch = await this.dispatchAllowed()
 
-    let clobOrderId = `real-${paperOrder.id}`
+    let clobOrderId = `prepost-${paperOrder.id}`
     let status: RealOrderRow['status'] = dispatch ? 'pending' : 'skipped'
     let rejectReason: string | null = null
 
@@ -528,38 +528,46 @@ export class ClobBroker implements OnModuleInit, OnApplicationShutdown {
       status = 'rejected'
       rejectReason = `size ${paperOrder.size} < CLOB minimum ${CLOB_MIN_SIZE}`
       this.logger.warn(`onOrderPlaced rejected: ${rejectReason} (decision ${decisionId})`)
-    } else if (dispatch && notional > this.maxNotional) {
-      status = 'rejected'
-      rejectReason = `notional $${notional} > max $${this.maxNotional}`
-      this.logger.warn(`onOrderPlaced rejected: ${rejectReason} (decision ${decisionId})`)
     } else if (dispatch) {
-      try {
-        const resp = await this.getClient().createAndPostOrder(
-          {
-            tokenID: realTokenId,
-            price: realPrice,
-            size: paperOrder.size,
-            side: realSide,
-          },
-          undefined,
-          OrderType.GTC,
-        )
-        const r = resp as Record<string, unknown>
-        if (!r['success']) {
-          throw new Error(String(r['errorMsg'] ?? r['error'] ?? 'Polymarket rejected order'))
-        }
-        const rawId = r['orderID'] ?? r['order_id'] ?? r['id']
-        if (!rawId) {
-          throw new Error(`CLOB accepted order but returned no order ID (resp: ${JSON.stringify(r)})`)
-        }
-        clobOrderId = String(rawId)
-        status = 'accepted'
-        const label = useNoBuy ? `buy-NO @ ${realPrice.toFixed(3)}` : `${paperOrder.side} @ ${realPrice.toFixed(3)}`
-        this.logger.log(`CLOB order placed: ${clobOrderId} [${label}] (decision ${decisionId})`)
-      } catch (err) {
-        rejectReason = err instanceof Error ? err.message : String(err)
+      // Cap size to stay within maxNotional; only reject if that still leaves size < CLOB min
+      let cappedSize = paperOrder.size
+      if (notional > this.maxNotional) {
+        cappedSize = Math.floor(this.maxNotional / realPrice)
+        this.logger.log(`onOrderPlaced: size capped ${paperOrder.size}→${cappedSize} for notional cap (decision ${decisionId})`)
+      }
+      if (cappedSize < CLOB_MIN_SIZE) {
         status = 'rejected'
-        this.logger.error(`CLOB placeOrder failed: ${rejectReason}`)
+        rejectReason = `size ${cappedSize} < CLOB minimum ${CLOB_MIN_SIZE} after notional cap`
+        this.logger.warn(`onOrderPlaced rejected: ${rejectReason} (decision ${decisionId})`)
+      } else {
+        try {
+          const resp = await this.getClient().createAndPostOrder(
+            {
+              tokenID: realTokenId,
+              price: realPrice,
+              size: cappedSize,
+              side: realSide,
+            },
+            undefined,
+            OrderType.GTC,
+          )
+          const r = resp as Record<string, unknown>
+          if (!r['success']) {
+            throw new Error(String(r['errorMsg'] ?? r['error'] ?? 'Polymarket rejected order'))
+          }
+          const rawId = r['orderID'] ?? r['order_id'] ?? r['id']
+          if (!rawId) {
+            throw new Error(`CLOB accepted order but returned no order ID (resp: ${JSON.stringify(r)})`)
+          }
+          clobOrderId = String(rawId)
+          status = 'accepted'
+          const label = useNoBuy ? `buy-NO @ ${realPrice.toFixed(3)}` : `${paperOrder.side} @ ${realPrice.toFixed(3)}`
+          this.logger.log(`CLOB order placed: ${clobOrderId} [${label}] (decision ${decisionId})`)
+        } catch (err) {
+          rejectReason = err instanceof Error ? err.message : String(err)
+          status = 'rejected'
+          this.logger.error(`CLOB placeOrder failed: ${rejectReason}`)
+        }
       }
     }
 
