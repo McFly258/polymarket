@@ -138,6 +138,11 @@ export interface RealBalanceDto {
   enabled: boolean
 }
 
+export interface RealRewardsDto {
+  totalUsd: number
+  date: string
+}
+
 export interface BackendEngineClient {
   snapshot(): EngineSnapshot
   subscribe(fn: () => void): () => void
@@ -153,6 +158,7 @@ export interface BackendEngineClient {
   fetchRealOrders(limit?: number): Promise<RealOrderRow[]>
   fetchRealFills(limit?: number): Promise<RealFillRow[]>
   fetchRealBalance(): Promise<RealBalanceDto>
+  fetchRealRewards(): Promise<RealRewardsDto>
   getMode(): 'paper' | 'real'
   setMode(mode: 'paper' | 'real'): void
 }
@@ -280,6 +286,12 @@ class BackendEngineClientImpl implements BackendEngineClient {
     const res = await fetch(`${BASE}/admin/real/balance`)
     if (!res.ok) throw new Error(`real/balance ${res.status}`)
     return (await res.json()) as RealBalanceDto
+  }
+
+  async fetchRealRewards(): Promise<RealRewardsDto> {
+    const res = await fetch(`${BASE}/admin/real/rewards/today`)
+    if (!res.ok) throw new Error(`real/rewards/today ${res.status}`)
+    return (await res.json()) as RealRewardsDto
   }
 
   private async poll(): Promise<void> {

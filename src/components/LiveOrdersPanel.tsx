@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState, useSyncExternalStore } from 'react'
 import { formatPrice, formatShortTime, formatUsd } from '../constants'
 import { useTimezone } from '../context/TimezoneContext'
 import { getBackendEngine } from '../services/backendEngine'
-import type { RealOrderRow, RealFillRow, RealBalanceDto } from '../services/backendEngine'
+import type { RealOrderRow, RealFillRow, RealBalanceDto, RealRewardsDto } from '../services/backendEngine'
 import type { PhantomOrder } from '../services/paperTrading'
 
 function statusDot(status: PhantomOrder['status']) {
@@ -58,6 +58,7 @@ export function LiveOrdersPanel() {
   const [realOrders, setRealOrders] = useState<RealOrderRow[]>([])
   const [realFillsRaw, setRealFillsRaw] = useState<RealFillRow[]>([])
   const [realBalance, setRealBalance] = useState<RealBalanceDto | null>(null)
+  const [realRewards, setRealRewards] = useState<RealRewardsDto | null>(null)
   const [realOrdersError, setRealOrdersError] = useState<string | null>(null)
   useEffect(() => {
     let cancelled = false
@@ -80,6 +81,22 @@ export function LiveOrdersPanel() {
     }
     void load()
     const id = window.setInterval(() => void load(), 5_000)
+    return () => { cancelled = true; window.clearInterval(id) }
+  }, [client])
+
+  // Rewards polled less frequently (every 2 min) — Polymarket LP rewards API
+  useEffect(() => {
+    let cancelled = false
+    async function loadRewards() {
+      try {
+        const r = await client.fetchRealRewards()
+        if (!cancelled) setRealRewards(r)
+      } catch {
+        // silently ignore — tile shows '—' until next success
+      }
+    }
+    void loadRewards()
+    const id = window.setInterval(() => void loadRewards(), 120_000)
     return () => { cancelled = true; window.clearInterval(id) }
   }, [client])
 
@@ -177,6 +194,12 @@ export function LiveOrdersPanel() {
           <div className="kpi-label">Net P&amp;L</div>
           <div className="kpi-value" style={{ color: realPnl >= 0 ? '#4ade80' : '#ef4444' }}>
             {realPnl >= 0 ? '+' : ''}{formatUsd(realPnl)}
+          </div>
+        </div>
+        <div className="sim-kpi">
+          <div className="kpi-label">Rewards today</div>
+          <div className="kpi-value kpi-green">
+            {realRewards ? formatUsd(realRewards.totalUsd) : '—'}
           </div>
         </div>
       </section>

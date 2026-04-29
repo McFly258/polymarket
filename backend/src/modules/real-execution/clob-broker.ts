@@ -424,6 +424,18 @@ export class ClobBroker implements OnModuleInit, OnApplicationShutdown {
     return this.isRealEnabled()
   }
 
+  async getTodayEarnings(): Promise<{ totalUsd: number; date: string }> {
+    const today = new Date().toISOString().slice(0, 10)
+    try {
+      const rows = await this.getClient().getTotalEarningsForUserForDay(today)
+      const totalUsd = rows.reduce((sum, row) => sum + (isFinite(row.earnings) ? row.earnings : 0), 0)
+      return { totalUsd, date: today }
+    } catch (err) {
+      this.logger.warn(`getTodayEarnings failed: ${(err as Error).message}`)
+      return { totalUsd: 0, date: today }
+    }
+  }
+
   // Looks up the NO-outcome token for a condition so hedge retries can close
   // ask-side positions (which were opened as buy-NO in real execution).
   async getNoTokenId(conditionId: string, yesTokenId: string): Promise<string | null> {

@@ -78,6 +78,11 @@ export class RealExecutionController {
     }
   }
 
+  @Get('admin/real/rewards/today')
+  async getRewardsToday(): Promise<{ totalUsd: number; date: string }> {
+    return this.broker.getTodayEarnings()
+  }
+
   @Post('admin/real/pause')
   async pause(): Promise<{ ok: boolean; message: string }> {
     await this.stateRepo.write({ paused: true, pauseReason: 'manually paused via API' })
