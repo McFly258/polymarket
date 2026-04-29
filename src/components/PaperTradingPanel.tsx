@@ -82,6 +82,12 @@ export function PaperTradingPanel({ rows, config, sim }: Props) {
   useEffect(() => {
     backendClient.setMode(mode)
   }, [backendClient, mode])
+  // Bump the chart refresh key when the mode flips so PnLChart re-fetches
+  // history scoped to the new lane (paper vs real).
+  const [chartRefreshKey, setChartRefreshKey] = useState(0)
+  useEffect(() => {
+    setChartRefreshKey((n) => n + 1)
+  }, [mode])
   const facade = useMemo(
     () => source === 'backend'
       ? backendFacade(backendClient, config)
@@ -115,7 +121,6 @@ export function PaperTradingPanel({ rows, config, sim }: Props) {
 
   // Bump chart refresh key every 5 minutes so the PnL chart re-fetches
   // hourly snapshots + fills history without thrashing the backend.
-  const [chartRefreshKey, setChartRefreshKey] = useState(0)
   useEffect(() => {
     const id = window.setInterval(() => setChartRefreshKey((n) => n + 1), 5 * 60_000)
     return () => window.clearInterval(id)

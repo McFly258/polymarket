@@ -238,13 +238,13 @@ class BackendEngineClientImpl implements BackendEngineClient {
   }
 
   async fetchRewardHistory(limit = 168): Promise<RewardHourlyPoint[]> {
-    const res = await fetch(`${BASE}/reward-history?limit=${limit}`)
+    const res = await fetch(`${BASE}/reward-history?limit=${limit}&mode=${this.mode}`)
     if (!res.ok) throw new Error(`reward-history ${res.status}`)
     return (await res.json()) as RewardHourlyPoint[]
   }
 
   async fetchPositionRewardHistory(conditionId?: string, limit = 168): Promise<PositionRewardHourlyPoint[]> {
-    const qs = new URLSearchParams({ limit: String(limit) })
+    const qs = new URLSearchParams({ limit: String(limit), mode: this.mode })
     if (conditionId) qs.set('conditionId', conditionId)
     const res = await fetch(`${BASE}/position-reward-history?${qs.toString()}`)
     if (!res.ok) throw new Error(`position-reward-history ${res.status}`)
@@ -252,7 +252,7 @@ class BackendEngineClientImpl implements BackendEngineClient {
   }
 
   async fetchCapitalHistory(limit = 288): Promise<CapitalPoint[]> {
-    const res = await fetch(`${BASE}/capital-history?limit=${limit}`)
+    const res = await fetch(`${BASE}/capital-history?limit=${limit}&mode=${this.mode}`)
     if (!res.ok) throw new Error(`capital-history ${res.status}`)
     return (await res.json()) as CapitalPoint[]
   }

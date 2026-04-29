@@ -104,14 +104,16 @@ export class EngineController {
   }
 
   @Get('reward-history')
-  async rewardHistory(@Query('limit') limit?: string) {
+  async rewardHistory(@Query('limit') limit?: string, @Query('mode') mode?: string) {
     const n = Math.min(Number(limit ?? 168) || 168, 8760)
+    if (mode === 'real') return []
     return this.rewardRepo.readHourly(n)
   }
 
   @Get('capital-history')
-  async capitalHistory(@Query('limit') limit?: string) {
+  async capitalHistory(@Query('limit') limit?: string, @Query('mode') mode?: string) {
     const n = Math.min(Number(limit ?? 288) || 288, 105_120)
+    if (mode === 'real') return []
     return this.capitalRepo.read(n)
   }
 
@@ -119,8 +121,10 @@ export class EngineController {
   async positionRewardHistory(
     @Query('conditionId') conditionId?: string,
     @Query('limit') limit?: string,
+    @Query('mode') mode?: string,
   ) {
     const n = Math.min(Number(limit ?? 168) || 168, 8760)
+    if (mode === 'real') return []
     return this.rewardRepo.readPositionHourly(conditionId, n)
   }
 
