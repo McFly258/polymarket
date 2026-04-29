@@ -199,7 +199,7 @@ export class ClobBroker implements OnModuleInit, OnApplicationShutdown {
     return envNum('REAL_MAX_DAILY_LOSS_USD', 100)
   }
   private get maxNotional(): number {
-    return envNum('REAL_MAX_NOTIONAL_USD', 5000)
+    return envNum('REAL_MAX_NOTIONAL_USD', 10)
   }
   private get minBalanceUsdc(): number {
     return envNum('REAL_MIN_BALANCE_USD', 10)
