@@ -382,12 +382,14 @@ export class ClobBroker implements OnModuleInit, OnApplicationShutdown {
 
   // Pulls trades for a wallet from data-api (covers both maker and taker
   // sides). Used to complement the CLOB SDK which only filters by maker.
+  // Uses /activity?type=TRADE instead of /trades because /trades only returns
+  // SELL-side (maker) fills — BUY fills as taker are invisible to it.
   // Normalizes the data-api shape into the reconciler-expected fields.
   private async fetchDataApiTrades(
     userAddress: string,
     _sinceMs: number,
   ): Promise<Array<Record<string, unknown>>> {
-    const url = `https://data-api.polymarket.com/trades?user=${userAddress}&limit=500`
+    const url = `https://data-api.polymarket.com/activity?user=${userAddress}&type=TRADE&limit=500`
     const resp = await fetch(url)
     if (!resp.ok) throw new Error(`data-api ${resp.status}`)
     const raw = (await resp.json()) as Array<Record<string, unknown>>
