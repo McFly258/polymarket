@@ -4,6 +4,7 @@ import { EventEmitter2 } from '@nestjs/event-emitter'
 import { BROKER_TOKEN, type Broker } from '../../domain/broker.types'
 import { CAPITAL_SAMPLE_MS, MTM_SWEEP_MS, REALLOC_MS, REWARD_TICK_MS } from '../../domain/constants'
 import { ENGINE_EVENT, type OrderCancelledEvent } from '../../domain/events'
+import { DEFAULT_STRATEGY } from '../../domain/strategy'
 import type { StrategyConfig } from '../../domain/strategy.types'
 import { MarketWsService } from '../polymarket/market-ws.service'
 import { EngineStateRepo } from '../persistence/engine-state.repo'
@@ -88,7 +89,11 @@ export class EngineService implements OnModuleInit, OnApplicationShutdown {
       } satisfies OrderCancelledEvent)
     }
     await this.positionRepo.clearAll()
-    await this.start(row.config, { resumed: true, prevStartedAt: row.startedAt })
+    // Merge with DEFAULT_STRATEGY so newly-added fields (e.g. mtmStopLossPct)
+    // apply on resume. Persisted configs may predate them, and missing fields
+    // would otherwise silently disable the corresponding behavior.
+    const resumedConfig: StrategyConfig = { ...DEFAULT_STRATEGY, ...row.config }
+    await this.start(resumedConfig, { resumed: true, prevStartedAt: row.startedAt })
   }
 
   async start(
