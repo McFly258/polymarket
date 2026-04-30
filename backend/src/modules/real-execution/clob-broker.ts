@@ -47,6 +47,7 @@ export interface BalanceSnapshot {
 export class ClobBroker implements OnModuleInit, OnApplicationShutdown {
   private readonly logger = new Logger(ClobBroker.name)
   private _client: ClobClient | null = null
+  private _eoaclient: ClobClient | null = null
   private _balanceTimer: NodeJS.Timeout | null = null
 
   constructor(
@@ -253,6 +254,26 @@ export class ClobBroker implements OnModuleInit, OnApplicationShutdown {
     return this._client
   }
 
+  // EOA client (signatureType=0): maker == signer == EOA. Used as a fallback
+  // when the primary proxy client reports "not enough balance" — happens for
+  // source='paper' fills where the original BUY was placed without a proxy, so
+  // YES tokens landed in the signer EOA rather than the Gnosis Safe.
+  private getEoaClient(): ClobClient {
+    if (this._eoaclient) return this._eoaclient
+    const pk = this.walletPrivateKey
+    if (!pk) throw new Error('CLOB_WALLET_PRIVATE_KEY required')
+    const account = privateKeyToAccount(pk as `0x${string}`)
+    const walletClient = createWalletClient({ account, chain: polygon, transport: http() })
+    this._eoaclient = new ClobClient({
+      host: CLOB_BASE,
+      chain: Chain.POLYGON,
+      signer: walletClient,
+      creds: { key: this.apiKey, secret: this.apiSecret, passphrase: this.apiPassphrase },
+      signatureType: 0,
+    })
+    return this._eoaclient
+  }
+
   private async dispatchAllowed(): Promise<boolean> {
     if (!this.isRealEnabled()) return false
     const state = await this.stateRepo.read()
@@ -456,6 +477,29 @@ export class ClobBroker implements OnModuleInit, OnApplicationShutdown {
     }
   }
 
+  // Fetches the actual on-chain token balance for a given tokenId from the
+  // positions API. Used to trim hedge sell amounts to what the wallet actually
+  // holds (fill.size can exceed actual balance due to CLOB rounding/fees).
+  private async fetchTokenBalance(tokenId: string): Promise<number | null> {
+    const pk = this.walletPrivateKey
+    const eoa = pk ? privateKeyToAccount(pk as `0x${string}`).address : undefined
+    const userAddress = this.funderAddress ?? eoa
+    if (!userAddress) return null
+    try {
+      const resp = await fetch(
+        `https://data-api.polymarket.com/positions?user=${userAddress}&sizeThreshold=0`,
+      )
+      if (!resp.ok) return null
+      const positions = (await resp.json()) as Array<Record<string, unknown>>
+      const pos = positions.find(
+        (p) => String(p['asset_id'] ?? p['token_id'] ?? '') === tokenId,
+      )
+      return pos ? Number(pos['size'] ?? 0) : 0
+    } catch {
+      return null
+    }
+  }
+
   // Dispatches a closing sell for a fill whose hedge was previously skipped or
   // failed. Ask-side fills used buy-NO at order time, so we sell NO to close;
   // bid-side fills bought YES, so we sell YES. Both are token sells — no USDC
@@ -469,8 +513,28 @@ export class ClobBroker implements OnModuleInit, OnApplicationShutdown {
     const useNoSell = fill.side === 'ask' && !!noTokenId
     const realTokenId = useNoSell ? noTokenId! : tokenId
     const realHedgePrice = useNoSell ? 1 - fill.hedgePrice : fill.hedgePrice
-    const hedgeAmount = fill.size
-    const notional = realHedgePrice * fill.size
+
+    // Trim to actual wallet balance — fill.size can exceed tokens received due
+    // to CLOB rounding/fees, causing "not enough balance" rejections on FOK.
+    let hedgeAmount = fill.size
+    const actualBalance = await this.fetchTokenBalance(realTokenId)
+    if (actualBalance !== null) {
+      if (actualBalance <= 0) {
+        this.logger.log(
+          `retryHedge: fill ${fill.id} — token balance 0, position already cleared`,
+        )
+        await this.fillRepo.updateHedge(fill.id, null, 'done', null)
+        return
+      }
+      if (actualBalance < hedgeAmount) {
+        this.logger.log(
+          `retryHedge: trimming fill ${fill.id} hedge ${hedgeAmount} → ${actualBalance} (actual wallet balance)`,
+        )
+        hedgeAmount = actualBalance
+      }
+    }
+
+    const notional = realHedgePrice * hedgeAmount
 
     if (notional > this.maxNotional) {
       this.logger.warn(
@@ -483,24 +547,43 @@ export class ClobBroker implements OnModuleInit, OnApplicationShutdown {
     let hedgeStatus: RealFillRow['hedgeStatus'] = 'failed'
     let txHash: string | null = null
 
-    try {
-      const resp = await this.getClient().createAndPostMarketOrder(
-        {
-          tokenID: realTokenId,
-          amount: hedgeAmount,
-          side: Side.SELL,
-          price: realHedgePrice,
-        },
-        undefined,
-        OrderType.FOK,
-      )
+    const orderParams = {
+      tokenID: realTokenId,
+      amount: hedgeAmount,
+      side: Side.SELL,
+      price: realHedgePrice,
+    }
+
+    const trySell = async (client: ClobClient): Promise<{ orderID: string; txHash: string | null }> => {
+      const resp = await client.createAndPostMarketOrder(orderParams, undefined, OrderType.FOK)
       const r = resp as Record<string, unknown>
       if (!r['success']) {
         throw new Error(String(r['errorMsg'] ?? r['error'] ?? 'Polymarket rejected hedge retry'))
       }
-      hedgeOrderId = String(r['orderID'] ?? r['id'] ?? fill.id)
       const hashes = r['transactionsHashes'] as string[] | undefined
-      txHash = hashes?.[0] ?? null
+      return {
+        orderID: String(r['orderID'] ?? r['id'] ?? fill.id),
+        txHash: hashes?.[0] ?? null,
+      }
+    }
+
+    try {
+      let result: { orderID: string; txHash: string | null }
+      try {
+        result = await trySell(this.getClient())
+      } catch (proxyErr) {
+        const msg = proxyErr instanceof Error ? proxyErr.message : String(proxyErr)
+        if (msg.includes('not enough balance') || msg.includes('not enough allowance')) {
+          this.logger.warn(
+            `retryHedge proxy balance insufficient for fill ${fill.id}, retrying via EOA client`,
+          )
+          result = await trySell(this.getEoaClient())
+        } else {
+          throw proxyErr
+        }
+      }
+      hedgeOrderId = result.orderID
+      txHash = result.txHash
       hedgeStatus = 'done'
       this.logger.log(`retryHedge done for fill ${fill.id}: hedge order ${hedgeOrderId}`)
     } catch (err) {

@@ -104,11 +104,12 @@ export class RealFillRepo {
       where: {
         hedgeStatus: { in: ['skipped', 'failed'] as string[] },
         filledAt: { gte: since },
-        // Only retry fills tied to a confirmed on-chain CLOB trade.
-        // Fills with clobTradeId=null came from paper-engine skips or backfills
-        // where no tokens ever landed in the wallet — retrying would always fail
-        // with "balance: 0".
-        clobTradeId: { not: null },
+        // Only retry fills where we know the tokenId — without it we can't
+        // place a hedge order on the CLOB. clobTradeId is not the right proxy
+        // because paper-engine fills (source='paper') can still be real on-chain
+        // positions; tokenId being set is the authoritative signal that hedging
+        // is possible.
+        tokenId: { not: null },
       },
       orderBy: { filledAt: 'asc' },
     })

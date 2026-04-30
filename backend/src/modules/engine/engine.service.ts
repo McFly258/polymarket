@@ -1,7 +1,9 @@
 import { Inject, Injectable, Logger, OnApplicationShutdown, OnModuleInit, forwardRef } from '@nestjs/common'
+import { EventEmitter2 } from '@nestjs/event-emitter'
 
 import { BROKER_TOKEN, type Broker } from '../../domain/broker.types'
 import { CAPITAL_SAMPLE_MS, REALLOC_MS, REWARD_TICK_MS } from '../../domain/constants'
+import { ENGINE_EVENT, type OrderCancelledEvent } from '../../domain/events'
 import type { StrategyConfig } from '../../domain/strategy.types'
 import { MarketWsService } from '../polymarket/market-ws.service'
 import { EngineStateRepo } from '../persistence/engine-state.repo'
@@ -43,6 +45,7 @@ export class EngineService implements OnModuleInit, OnApplicationShutdown {
     private readonly fillRepo: FillRepo,
     private readonly positionRepo: PositionRepo,
     private readonly capitalRepo: CapitalRepo,
+    private readonly events: EventEmitter2,
     @Inject(forwardRef(() => EngineAllocService)) private readonly alloc: EngineAllocService,
     @Inject(forwardRef(() => EngineFillService)) private readonly fill: EngineFillService,
     private readonly rewards: EngineRewardsService,
@@ -73,7 +76,16 @@ export class EngineService implements OnModuleInit, OnApplicationShutdown {
     const row = await this.stateRepo.read()
     if (row.state !== 'running' || !row.config) return
     this.logger.log('resuming previous run from Postgres…')
-    await this.orderRepo.cancelAllResting(Date.now())
+    const now = Date.now()
+    const resting = (await this.orderRepo.readRecent(2000)).filter((o) => o.status === 'resting')
+    await this.orderRepo.cancelAllResting(now)
+    for (const o of resting) {
+      this.events.emit(ENGINE_EVENT.ORDER_CANCELLED, {
+        decisionId: o.decisionId,
+        paperOrderId: o.id,
+        at: now,
+      } satisfies OrderCancelledEvent)
+    }
     await this.positionRepo.clearAll()
     await this.start(row.config, { resumed: true, prevStartedAt: row.startedAt })
   }
@@ -120,6 +132,13 @@ export class EngineService implements OnModuleInit, OnApplicationShutdown {
     const resting = orders.filter((o) => o.status === 'resting')
     await Promise.all(resting.map((o) => this.broker.cancelOrder(o.id)))
     await this.orderRepo.cancelAllResting(now)
+    for (const o of resting) {
+      this.events.emit(ENGINE_EVENT.ORDER_CANCELLED, {
+        decisionId: o.decisionId,
+        paperOrderId: o.id,
+        at: now,
+      } satisfies OrderCancelledEvent)
+    }
     await this.positionRepo.clearAll()
     this.state.positions.clear()
 

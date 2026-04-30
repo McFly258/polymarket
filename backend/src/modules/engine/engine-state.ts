@@ -20,6 +20,10 @@ export interface EngineRuntimeState {
   rewardLastRate: number
   rewardLastUpdatedAt: number
   ws: WsClient | null
+  // Condition IDs included in the most recent reallocate() run. repositionMarket
+  // checks this set to avoid re-opening markets that reallocate() intentionally
+  // dropped, even when a concurrent drift-cancel fires for the same market.
+  lastAllocSet: Set<string>
 }
 
 export function createEngineRuntimeState(): EngineRuntimeState {
@@ -38,6 +42,7 @@ export function createEngineRuntimeState(): EngineRuntimeState {
     rewardLastRate: 0,
     rewardLastUpdatedAt: Date.now(),
     ws: null,
+    lastAllocSet: new Set(),
   }
 }
 

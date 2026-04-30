@@ -68,6 +68,7 @@ export class EngineAllocService {
     const sim = runSimulation(rows, s.config, vol)
     const byCondition = new Map(sim.allocations.map((a) => [a.conditionId, a]))
     const rowsById = new Map(rows.map((r) => [r.conditionId, r]))
+    s.lastAllocSet = new Set(sim.allocations.map((a) => a.conditionId))
     this.logger.log(
       `  allocations: ${sim.allocations.length} markets, deployed=$${sim.deployedCapital.toFixed(0)}, gross=$${sim.grossDailyUsd.toFixed(2)}/day`,
     )
@@ -351,6 +352,10 @@ export class EngineAllocService {
     if (s.state !== 'running' || !s.config) return
     if (s.positions.has(conditionId)) return
     const tag = conditionId.slice(0, 8)
+    if (s.lastAllocSet.size > 0 && !s.lastAllocSet.has(conditionId)) {
+      this.logger.log(`reposition ${tag} — not in latest alloc set, skip`)
+      return
+    }
     let rows: RewardsRow[]
     try {
       rows = await this.data.fetchRewardsRows()
@@ -367,6 +372,10 @@ export class EngineAllocService {
       return
     }
     if (s.state !== 'running' || s.positions.has(conditionId)) return
+    if (!s.lastAllocSet.has(conditionId)) {
+      this.logger.log(`reposition ${tag} — dropped by allocator mid-flight, skip`)
+      return
+    }
     this.logger.log(`reposition ${tag} — post-drift repost`)
     await this.openPosition(s, alloc, row, vol)
   }
