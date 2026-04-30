@@ -151,6 +151,9 @@ export class ClobBroker implements OnModuleInit, OnApplicationShutdown {
     // that threshold are unliquidatable dust. We surface them once then exclude
     // them from the work list so the retry loop can converge.
     const dustLogged = new Set<string>()
+    // Tokens where Polymarket returned balance=0 — the data-API position record
+    // is stale; the on-chain wallet holds nothing. Retrying is pointless.
+    const ghostTokens = new Set<string>()
 
     const fetchHeld = async (): Promise<Array<Record<string, unknown>>> => {
       const r = await fetch(
@@ -164,9 +167,10 @@ export class ClobBroker implements OnModuleInit, OnApplicationShutdown {
       const live = positions.filter((p) => Number(p['size'] ?? 0) > 0.01)
       const sellable: Array<Record<string, unknown>> = []
       for (const p of live) {
+        const tokenId = String(p['asset_id'] ?? p['token_id'] ?? p['asset'] ?? '')
+        if (ghostTokens.has(tokenId)) continue
         const size = Number(p['size'] ?? 0)
         if (size < CLOB_MIN_SIZE) {
-          const tokenId = String(p['asset_id'] ?? p['token_id'] ?? p['asset'] ?? '')
           if (tokenId && !dustLogged.has(tokenId)) {
             dustLogged.add(tokenId)
             this.logger.warn(
@@ -214,9 +218,25 @@ export class ClobBroker implements OnModuleInit, OnApplicationShutdown {
         // FOK-only: no GTC fallback. GTC partial fills can leave sub-minimum residuals
         // that are permanently unliquidatable. If FOK fails, the retry loop will attempt
         // again with a lower price until the position clears or retries are exhausted.
-        this.logger.log(
-          `${phase} sell ${tokenId.slice(0, 8)}${attempt > 1 ? ` (attempt ${attempt}, limit ${limitPrice.toFixed(3)})` : ''}: ${r['success'] ? 'done' : `FOK failed — ${String(r['errorMsg'] ?? r['error'] ?? 'unknown')} (will retry)`}`,
-        )
+        if (!r['success']) {
+          const errMsg = String(r['errorMsg'] ?? r['error'] ?? 'unknown')
+          // "balance: 0" means the data-API entry is stale — the wallet genuinely
+          // holds zero shares. Retrying will never succeed; mark as ghost and skip.
+          if (/balance:\s*0[^.0-9]/i.test(errMsg)) {
+            ghostTokens.add(tokenId)
+            this.logger.warn(
+              `${phase} sell ${tokenId.slice(0, 8)}: wallet balance is 0 — stale data-API record (ghost position), skipping retries`,
+            )
+          } else {
+            this.logger.log(
+              `${phase} sell ${tokenId.slice(0, 8)}${attempt > 1 ? ` (attempt ${attempt}, limit ${limitPrice.toFixed(3)})` : ''}: FOK failed — ${errMsg} (will retry)`,
+            )
+          }
+        } else {
+          this.logger.log(
+            `${phase} sell ${tokenId.slice(0, 8)}${attempt > 1 ? ` (attempt ${attempt}, limit ${limitPrice.toFixed(3)})` : ''}: done`,
+          )
+        }
       } catch (err) {
         this.logger.error(
           `${phase} liquidate ${tokenId.slice(0, 8)} failed: ${err instanceof Error ? err.message : String(err)}`,
