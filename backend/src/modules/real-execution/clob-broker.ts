@@ -843,21 +843,40 @@ export class ClobBroker implements OnModuleInit, OnApplicationShutdown {
       return
     }
 
-    const limitPrice = Math.max((pos?.price ?? 0.5) - 0.01, 0.01)
-    this.logger.log(
-      `Post-cancel residual: order ${order.id.slice(0, 10)} token ${tokenId.slice(0, 8)} size=${size.toFixed(4)} — posting GTC sell @ ${limitPrice}`,
-    )
-    const resp = await this.getClient().createAndPostOrder(
-      { tokenID: tokenId, price: limitPrice, size, side: Side.SELL },
-      undefined,
-      OrderType.GTC,
-    )
-    const r = resp as Record<string, unknown>
-    if (!r['success']) {
-      this.logger.warn(
-        `Post-cancel sell failed for ${order.id.slice(0, 10)}: ${String(r['errorMsg'] ?? r['error'] ?? 'unknown')}`,
+    const MAX_RETRIES = 5
+    const RETRY_DELAY_MS = 3_000
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+      const curPos = await this.fetchPositionData(tokenId)
+      const curSize = curPos?.size ?? 0
+      if (curSize < 0.01) return
+      if (curSize < CLOB_MIN_SIZE) {
+        this.logger.warn(
+          `Post-cancel dust: order ${order.id.slice(0, 10)} token ${tokenId.slice(0, 8)} size=${curSize.toFixed(4)} — below CLOB min (${CLOB_MIN_SIZE}), unliquidatable`,
+        )
+        return
+      }
+      const limitPrice = Math.max((curPos?.price ?? 0.5) - 0.01 * attempt, 0.01)
+      this.logger.log(
+        `Post-cancel residual attempt ${attempt}/${MAX_RETRIES}: order ${order.id.slice(0, 10)} token ${tokenId.slice(0, 8)} size=${curSize.toFixed(4)} — FOK sell @ ${limitPrice}`,
       )
+      const resp = await this.getClient().createAndPostMarketOrder(
+        { tokenID: tokenId, amount: curSize, side: Side.SELL, price: limitPrice },
+        undefined,
+        OrderType.FOK,
+      )
+      const r = resp as Record<string, unknown>
+      if (r['success']) {
+        this.logger.log(`Post-cancel residual cleared: order ${order.id.slice(0, 10)}`)
+        return
+      }
+      this.logger.warn(
+        `Post-cancel FOK sell attempt ${attempt} failed: ${String(r['errorMsg'] ?? r['error'] ?? 'unknown')}`,
+      )
+      if (attempt < MAX_RETRIES) await new Promise((res) => setTimeout(res, RETRY_DELAY_MS))
     }
+    this.logger.warn(
+      `Post-cancel residual not cleared after ${MAX_RETRIES} attempts: order ${order.id.slice(0, 10)} token ${tokenId.slice(0, 8)}`,
+    )
   }
 
   async onOrderFilled(evt: OrderFilledEvent): Promise<void> {
