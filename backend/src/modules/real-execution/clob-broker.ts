@@ -17,6 +17,7 @@ import { RealOrderRepo } from './real-order.repo'
 import { RealStateRepo } from './real-state.repo'
 
 const CLOB_BASE = 'https://clob.polymarket.com'
+const CLOB_MIN_SIZE = 5
 
 function env(key: string, fallback: string): string {
   return process.env[key] ?? fallback
@@ -149,7 +150,6 @@ export class ClobBroker implements OnModuleInit, OnApplicationShutdown {
     // Polymarket CLOB rejects orders smaller than 5 shares, so positions below
     // that threshold are unliquidatable dust. We surface them once then exclude
     // them from the work list so the retry loop can converge.
-    const CLOB_MIN_SIZE = 5
     const dustLogged = new Set<string>()
 
     const fetchHeld = async (): Promise<Array<Record<string, unknown>>> => {
@@ -550,10 +550,10 @@ export class ClobBroker implements OnModuleInit, OnApplicationShutdown {
     }
   }
 
-  // Fetches the actual on-chain token balance for a given tokenId from the
-  // positions API. Used to trim hedge sell amounts to what the wallet actually
-  // holds (fill.size can exceed actual balance due to CLOB rounding/fees).
-  private async fetchTokenBalance(tokenId: string): Promise<number | null> {
+  // Fetches the actual on-chain token position (size + current price) from the
+  // positions API. Used to trim hedge sell amounts and price post-cancel sells.
+  // fill.size can exceed actual balance due to CLOB rounding/fees.
+  private async fetchPositionData(tokenId: string): Promise<{ size: number; price: number } | null> {
     const pk = this.walletPrivateKey
     const eoa = pk ? privateKeyToAccount(pk as `0x${string}`).address : undefined
     const userAddress = this.funderAddress ?? eoa
@@ -567,7 +567,11 @@ export class ClobBroker implements OnModuleInit, OnApplicationShutdown {
       const pos = positions.find(
         (p) => String(p['asset_id'] ?? p['token_id'] ?? '') === tokenId,
       )
-      return pos ? Number(pos['size'] ?? 0) : 0
+      if (!pos) return { size: 0, price: 0.5 }
+      return {
+        size: Number(pos['size'] ?? 0),
+        price: Number(pos['curPrice'] ?? pos['price'] ?? 0.5),
+      }
     } catch {
       return null
     }
@@ -590,7 +594,8 @@ export class ClobBroker implements OnModuleInit, OnApplicationShutdown {
     // Trim to actual wallet balance — fill.size can exceed tokens received due
     // to CLOB rounding/fees, causing "not enough balance" rejections on FOK.
     let hedgeAmount = fill.size
-    const actualBalance = await this.fetchTokenBalance(realTokenId)
+    const posData = await this.fetchPositionData(realTokenId)
+    const actualBalance = posData?.size ?? null
     if (actualBalance !== null) {
       if (actualBalance <= 0) {
         this.logger.log(
@@ -605,6 +610,14 @@ export class ClobBroker implements OnModuleInit, OnApplicationShutdown {
         )
         hedgeAmount = actualBalance
       }
+    }
+
+    if (hedgeAmount < CLOB_MIN_SIZE) {
+      this.logger.warn(
+        `retryHedge: fill ${fill.id} — balance ${hedgeAmount.toFixed(4)} below CLOB min (${CLOB_MIN_SIZE}), dust cannot be hedged — abandoning`,
+      )
+      await this.fillRepo.updateHedge(fill.id, null, 'abandoned', null)
+      return
     }
 
     const notional = realHedgePrice * hedgeAmount
@@ -697,7 +710,6 @@ export class ClobBroker implements OnModuleInit, OnApplicationShutdown {
     let status: RealOrderRow['status'] = dispatch ? 'pending' : 'skipped'
     let rejectReason: string | null = null
 
-    const CLOB_MIN_SIZE = 5
     if (dispatch && paperOrder.size < CLOB_MIN_SIZE) {
       status = 'rejected'
       rejectReason = `size ${paperOrder.size} < CLOB minimum ${CLOB_MIN_SIZE}`
@@ -790,6 +802,64 @@ export class ClobBroker implements OnModuleInit, OnApplicationShutdown {
     } catch (err) {
       this.logger.error(
         `CLOB cancelOrder failed for ${real.id}: ${err instanceof Error ? err.message : String(err)}`,
+      )
+    }
+
+    // GTC orders can accumulate partial fills before being cancelled. Sell any
+    // residual tokens immediately so they don't build up as unliquidatable dust.
+    await this.cleanupResidualAfterCancel(real).catch((err) =>
+      this.logger.error(
+        `Post-cancel cleanup ${real.id.slice(0, 10)}: ${err instanceof Error ? err.message : String(err)}`,
+      ),
+    )
+  }
+
+  // After a GTC order cancel, checks the wallet for any partially-filled tokens
+  // and posts a GTC sell to clear them. Logs dust (< CLOB_MIN_SIZE) without
+  // attempting to sell since the orderbook won't accept sub-minimum orders.
+  private async cleanupResidualAfterCancel(order: RealOrderRow): Promise<void> {
+    // ASK-side real orders bought NO tokens (sell YES ≡ buy NO). Resolve the NO
+    // token ID so we can check and sell the right token.
+    const useNoSell = order.side === 'ask'
+    let tokenId: string
+    if (useNoSell) {
+      const noToken = await this.getNoTokenId(order.conditionId, order.tokenId)
+      if (!noToken) {
+        this.logger.warn(
+          `Post-cancel cleanup ${order.id.slice(0, 10)}: cannot resolve NO token for ask residual — skipping`,
+        )
+        return
+      }
+      tokenId = noToken
+    } else {
+      tokenId = order.tokenId
+    }
+    if (!tokenId) return
+
+    const pos = await this.fetchPositionData(tokenId)
+    const size = pos?.size ?? 0
+    if (size < 0.01) return
+
+    if (size < CLOB_MIN_SIZE) {
+      this.logger.warn(
+        `Post-cancel dust: order ${order.id.slice(0, 10)} token ${tokenId.slice(0, 8)} size=${size.toFixed(4)} — below CLOB min (${CLOB_MIN_SIZE}), unliquidatable`,
+      )
+      return
+    }
+
+    const limitPrice = Math.max((pos?.price ?? 0.5) - 0.01, 0.01)
+    this.logger.log(
+      `Post-cancel residual: order ${order.id.slice(0, 10)} token ${tokenId.slice(0, 8)} size=${size.toFixed(4)} — posting GTC sell @ ${limitPrice}`,
+    )
+    const resp = await this.getClient().createAndPostOrder(
+      { tokenID: tokenId, price: limitPrice, size, side: Side.SELL },
+      undefined,
+      OrderType.GTC,
+    )
+    const r = resp as Record<string, unknown>
+    if (!r['success']) {
+      this.logger.warn(
+        `Post-cancel sell failed for ${order.id.slice(0, 10)}: ${String(r['errorMsg'] ?? r['error'] ?? 'unknown')}`,
       )
     }
   }
