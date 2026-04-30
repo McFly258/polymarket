@@ -57,6 +57,60 @@ export class EngineFillService {
     pos.bestBid = view.bestBid
     pos.bestAsk = view.bestAsk
 
+    // C5: MTM stop-loss — mid has moved far enough against our resting price
+    // that a fill would be unhedgeable without a large loss. Cancel and blacklist.
+    const mtmStop = s.config?.mtmStopLossPct ?? 0
+    if (mtmStop > 0 && view.mid !== null) {
+      const bidBreached = !!pos.bidOrderId && view.mid < pos.bidPrice * (1 - mtmStop)
+      const askBreached = !!pos.askOrderId && view.mid > pos.askPrice * (1 + mtmStop)
+      if (bidBreached || askBreached) {
+        const side = bidBreached ? 'bid' : 'ask'
+        const ourPrice = bidBreached ? pos.bidPrice : pos.askPrice
+        const tag = pos.conditionId.slice(0, 8)
+        this.logger.log(
+          `C5 MTM stop-loss ${tag} — mid=${view.mid.toFixed(3)} ${side}Price=${ourPrice.toFixed(3)} threshold=${(mtmStop * 100).toFixed(0)}%`,
+        )
+        const blMs = (s.config?.blacklistMinutes ?? 60) * 60_000
+        s.blacklist.set(pos.conditionId, Date.now() + blMs)
+        s.fillHistory.delete(pos.conditionId)
+        s.marketPnlHistory.delete(pos.conditionId)
+        s.inventoryBias.delete(pos.conditionId)
+        void this.alloc.closePosition(s, pos.conditionId)
+        notifyTelegram(
+          `⛔ MTM stop-loss: ${side} posted at ${ourPrice.toFixed(3)}, mid=${view.mid.toFixed(3)} (>${(mtmStop * 100).toFixed(0)}% move)\n${pos.question}\nOrders cancelled. Blacklisted ${s.config?.blacklistMinutes ?? 60}m.`,
+        )
+        return
+      }
+    }
+
+    // C5b: Inventory MTM stop-loss — one side already filled (holding inventory),
+    // mid has moved far enough against our fill price that carrying the position
+    // is worse than closing now. Complements C5 which only fires on open orders.
+    const longInventory = !pos.bidOrderId && !!pos.askOrderId
+    const shortInventory = !!pos.bidOrderId && !pos.askOrderId
+    if (mtmStop > 0 && view.mid !== null && (longInventory || shortInventory)) {
+      const longBreached = longInventory && view.mid < pos.bidPrice * (1 - mtmStop)
+      const shortBreached = shortInventory && view.mid > pos.askPrice * (1 + mtmStop)
+      if (longBreached || shortBreached) {
+        const inventorySide = longBreached ? 'long' : 'short'
+        const fillPrice = longBreached ? pos.bidPrice : pos.askPrice
+        const tag = pos.conditionId.slice(0, 8)
+        this.logger.log(
+          `C5b inventory MTM stop ${tag} — ${inventorySide} filled@${fillPrice.toFixed(3)} mid=${view.mid.toFixed(3)} threshold=${(mtmStop * 100).toFixed(0)}%`,
+        )
+        const blMs = (s.config?.blacklistMinutes ?? 60) * 60_000
+        s.blacklist.set(pos.conditionId, Date.now() + blMs)
+        s.fillHistory.delete(pos.conditionId)
+        s.marketPnlHistory.delete(pos.conditionId)
+        s.inventoryBias.delete(pos.conditionId)
+        void this.alloc.closePosition(s, pos.conditionId)
+        notifyTelegram(
+          `⛔ Inventory MTM stop-loss: ${inventorySide} filled@${fillPrice.toFixed(3)}, mid=${view.mid.toFixed(3)} (>${(mtmStop * 100).toFixed(0)}% against)\n${pos.question}\nRemaining order cancelled. Blacklisted ${s.config?.blacklistMinutes ?? 60}m.`,
+        )
+        return
+      }
+    }
+
     // C4: drift-cancel.
     const bidDrift =
       pos.bidOrderId &&
@@ -100,6 +154,66 @@ export class EngineFillService {
     }
     if (pos.askOrderId && view.bestAsk !== null && view.bestAsk >= pos.askPrice) {
       void this.handleFill(s, pos, 'ask', view)
+    }
+  }
+
+  // Periodic sweep — fires on a timer independent of book ticks. Catches the case
+  // where the WS goes quiet (illiquid or resolved market) but midPrice was last
+  // updated while the book was still live and already reflects the collapsed price.
+  sweepMtm(s: EngineRuntimeState): void {
+    if (s.state !== 'running') return
+    const mtmStop = s.config?.mtmStopLossPct ?? 0
+    if (mtmStop <= 0) return
+    for (const pos of s.positions.values()) {
+      if (pos.midPrice === null) continue
+      const mid = pos.midPrice
+
+      // C5-sweep: open order MTM
+      const bidBreached = !!pos.bidOrderId && mid < pos.bidPrice * (1 - mtmStop)
+      const askBreached = !!pos.askOrderId && mid > pos.askPrice * (1 + mtmStop)
+      if (bidBreached || askBreached) {
+        const side = bidBreached ? 'bid' : 'ask'
+        const ourPrice = bidBreached ? pos.bidPrice : pos.askPrice
+        const tag = pos.conditionId.slice(0, 8)
+        this.logger.log(
+          `C5-sweep MTM stop ${tag} — mid=${mid.toFixed(3)} ${side}Price=${ourPrice.toFixed(3)} threshold=${(mtmStop * 100).toFixed(0)}%`,
+        )
+        const blMs = (s.config?.blacklistMinutes ?? 60) * 60_000
+        s.blacklist.set(pos.conditionId, Date.now() + blMs)
+        s.fillHistory.delete(pos.conditionId)
+        s.marketPnlHistory.delete(pos.conditionId)
+        s.inventoryBias.delete(pos.conditionId)
+        void this.alloc.closePosition(s, pos.conditionId)
+        notifyTelegram(
+          `⛔ MTM stop-loss (sweep): ${side} posted at ${ourPrice.toFixed(3)}, mid=${mid.toFixed(3)} (>${(mtmStop * 100).toFixed(0)}% move)\n${pos.question}\nOrders cancelled. Blacklisted ${s.config?.blacklistMinutes ?? 60}m.`,
+        )
+        continue
+      }
+
+      // C5b-sweep: inventory MTM (one side filled, other still open)
+      const longInventory = !pos.bidOrderId && !!pos.askOrderId
+      const shortInventory = !!pos.bidOrderId && !pos.askOrderId
+      if (longInventory || shortInventory) {
+        const longBreached = longInventory && mid < pos.bidPrice * (1 - mtmStop)
+        const shortBreached = shortInventory && mid > pos.askPrice * (1 + mtmStop)
+        if (longBreached || shortBreached) {
+          const inventorySide = longBreached ? 'long' : 'short'
+          const fillPrice = longBreached ? pos.bidPrice : pos.askPrice
+          const tag = pos.conditionId.slice(0, 8)
+          this.logger.log(
+            `C5b-sweep inventory MTM stop ${tag} — ${inventorySide} filled@${fillPrice.toFixed(3)} mid=${mid.toFixed(3)} threshold=${(mtmStop * 100).toFixed(0)}%`,
+          )
+          const blMs = (s.config?.blacklistMinutes ?? 60) * 60_000
+          s.blacklist.set(pos.conditionId, Date.now() + blMs)
+          s.fillHistory.delete(pos.conditionId)
+          s.marketPnlHistory.delete(pos.conditionId)
+          s.inventoryBias.delete(pos.conditionId)
+          void this.alloc.closePosition(s, pos.conditionId)
+          notifyTelegram(
+            `⛔ Inventory MTM stop-loss (sweep): ${inventorySide} filled@${fillPrice.toFixed(3)}, mid=${mid.toFixed(3)} (>${(mtmStop * 100).toFixed(0)}% against)\n${pos.question}\nRemaining order cancelled. Blacklisted ${s.config?.blacklistMinutes ?? 60}m.`,
+          )
+        }
+      }
     }
   }
 

@@ -33,6 +33,7 @@ export interface StrategyConfig {
   enforceRewardMinSize?: boolean
   subMinFallbackEnabled?: boolean
   maxRewardMinSize?: number
+  mtmStopLossPct?: number
 }
 
 export interface StrategyAllocation {

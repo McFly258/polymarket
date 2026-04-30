@@ -4,6 +4,7 @@
 export const REWARD_TICK_MS = 1_000
 export const REALLOC_MS = 5 * 60_000
 export const CAPITAL_SAMPLE_MS = 5 * 60_000
+export const MTM_SWEEP_MS = 60_000
 export const VOL_WINDOW_HOURS = 24
 
 export const MIN_PRICE_FLOOR = 0.05

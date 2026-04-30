@@ -2,7 +2,7 @@ import { Inject, Injectable, Logger, OnApplicationShutdown, OnModuleInit, forwar
 import { EventEmitter2 } from '@nestjs/event-emitter'
 
 import { BROKER_TOKEN, type Broker } from '../../domain/broker.types'
-import { CAPITAL_SAMPLE_MS, REALLOC_MS, REWARD_TICK_MS } from '../../domain/constants'
+import { CAPITAL_SAMPLE_MS, MTM_SWEEP_MS, REALLOC_MS, REWARD_TICK_MS } from '../../domain/constants'
 import { ENGINE_EVENT, type OrderCancelledEvent } from '../../domain/events'
 import type { StrategyConfig } from '../../domain/strategy.types'
 import { MarketWsService } from '../polymarket/market-ws.service'
@@ -29,6 +29,7 @@ export class EngineService implements OnModuleInit, OnApplicationShutdown {
 
   private rewardTimer: NodeJS.Timeout | null = null
   private reallocTimer: NodeJS.Timeout | null = null
+  private mtmSweepTimer: NodeJS.Timeout | null = null
   private hourlyTimer: NodeJS.Timeout | null = null
   private hourlyBootstrap: NodeJS.Timeout | null = null
   private capitalTimer: NodeJS.Timeout | null = null
@@ -112,6 +113,7 @@ export class EngineService implements OnModuleInit, OnApplicationShutdown {
     await this.alloc.reallocate(this.state)
     this.scheduleRewardTick()
     this.scheduleRealloc()
+    this.scheduleMtmSweep()
     this.scheduleHourlySnapshot()
     this.scheduleCapitalSample()
     this.logger.log(`started — ${this.state.positions.size} positions`)
@@ -202,6 +204,7 @@ export class EngineService implements OnModuleInit, OnApplicationShutdown {
   private clearTimers(): void {
     if (this.rewardTimer) { clearInterval(this.rewardTimer); this.rewardTimer = null }
     if (this.reallocTimer) { clearInterval(this.reallocTimer); this.reallocTimer = null }
+    if (this.mtmSweepTimer) { clearInterval(this.mtmSweepTimer); this.mtmSweepTimer = null }
     if (this.hourlyTimer) { clearInterval(this.hourlyTimer); this.hourlyTimer = null }
     if (this.hourlyBootstrap) { clearTimeout(this.hourlyBootstrap); this.hourlyBootstrap = null }
     if (this.capitalTimer) { clearInterval(this.capitalTimer); this.capitalTimer = null }
@@ -216,6 +219,11 @@ export class EngineService implements OnModuleInit, OnApplicationShutdown {
   private scheduleRealloc(): void {
     if (this.reallocTimer) clearInterval(this.reallocTimer)
     this.reallocTimer = setInterval(() => void this.alloc.reallocate(this.state), REALLOC_MS)
+  }
+
+  private scheduleMtmSweep(): void {
+    if (this.mtmSweepTimer) clearInterval(this.mtmSweepTimer)
+    this.mtmSweepTimer = setInterval(() => this.fill.sweepMtm(this.state), MTM_SWEEP_MS)
   }
 
   private scheduleHourlySnapshot(): void {

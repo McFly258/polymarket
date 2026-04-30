@@ -52,6 +52,10 @@ export const DEFAULT_STRATEGY: StrategyConfig = {
   softFallbackMinYieldPct: 0.02,
   asymmetricSizingEnabled: true,
   maxRewardMinSize: 50,
+  // Cancel pending orders when the market mid moves more than this fraction
+  // against our posted price (e.g. 0.5 = 50%). Prevents being filled into a
+  // position at a price that has become deeply out-of-the-money before the fill.
+  mtmStopLossPct: 0.50,
 }
 
 // ── Reward scoring ──────────────────────────────────────────────────────────
