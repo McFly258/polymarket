@@ -256,9 +256,34 @@ export class ClobBroker implements OnModuleInit, OnApplicationShutdown {
           )
         }
       } catch (err) {
-        this.logger.error(
-          `${phase} liquidate ${tokenId.slice(0, 8)} failed: ${err instanceof Error ? err.message : String(err)}`,
-        )
+        const errMsg = err instanceof Error ? err.message : String(err)
+        // Axios throws on HTTP 400 — the balance=0 guard must live here too,
+        // not only in the success=false branch.
+        if (/balance:\s*0[^.0-9]/i.test(errMsg)) {
+          ghostTokens.add(tokenId)
+          this.logger.warn(
+            `${phase} sell ${tokenId.slice(0, 8)}: wallet balance is 0 (thrown) — stale data-API record, skipping retries`,
+          )
+          try {
+            const allPos = await this.positionRepo.readAll()
+            for (const p of allPos) {
+              if (String(p.tokenId) === tokenId || p.tokenId === '') {
+                await this.positionRepo.delete(p.conditionId)
+                this.logger.log(
+                  `${phase} cleanup: deleted ghost real_position conditionId=${p.conditionId.slice(0, 16)}`,
+                )
+              }
+            }
+          } catch (cleanupErr) {
+            this.logger.warn(
+              `${phase} cleanup failed for ghost ${tokenId.slice(0, 8)}: ${cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr)}`,
+            )
+          }
+        } else {
+          this.logger.error(
+            `${phase} liquidate ${tokenId.slice(0, 8)} failed: ${errMsg}`,
+          )
+        }
       }
     }
 
