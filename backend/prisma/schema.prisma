@@ -178,9 +178,16 @@ model RealFill {
   // CLOB-side trade identifier — dedup key so reconciler re-runs never double
   // insert a fill. Null on fills created from paper events (no CLOB trade yet).
   clobTradeId    String?  @unique @map("clob_trade_id")
+  // CLOB asset/token ID stored at insert time so retryUnhedgedFills never has
+  // to derive it from clobTradeId or look it up via the order table.
+  tokenId        String?  @map("token_id")
   // 'paper' = inserted from ORDER_FILLED event, 'reconciler' = inserted by the
   // reconciliation poller after seeing a CLOB trade not matched to a paper fill.
   source         String   @default("paper")
+  // Number of times retryUnhedgedFills has failed on this fill. Fills are
+  // marked 'abandoned' once this reaches HEDGE_MAX_RETRIES and removed from
+  // the retry queue permanently.
+  hedgeRetryCount Int     @default(0) @map("hedge_retry_count")
 
   @@index([filledAt(sort: Desc)])
   @@index([decisionId])

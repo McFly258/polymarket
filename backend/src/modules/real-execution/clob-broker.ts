@@ -507,6 +507,8 @@ export class ClobBroker implements OnModuleInit, OnApplicationShutdown {
       this.logger.error(
         `retryHedge failed for fill ${fill.id}: ${err instanceof Error ? err.message : String(err)}`,
       )
+      await this.fillRepo.updateHedge(fill.id, null, 'failed', null)
+      throw err
     }
 
     await this.fillRepo.updateHedge(fill.id, hedgeOrderId, hedgeStatus, txHash)
@@ -740,7 +742,9 @@ export class ClobBroker implements OnModuleInit, OnApplicationShutdown {
       hedgeStatus,
       txHash,
       clobTradeId: null,
+      tokenId: tokenId ?? null,
       source: 'paper',
+      hedgeRetryCount: 0,
     })
 
     if (dispatch && hedgeStatus === 'done') {

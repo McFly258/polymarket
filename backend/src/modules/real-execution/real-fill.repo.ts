@@ -2,7 +2,7 @@ import { Injectable } from '@nestjs/common'
 
 import { PrismaService } from '../prisma/prisma.service'
 
-export type HedgeStatus = 'pending' | 'done' | 'failed' | 'skipped' | 'not-applicable'
+export type HedgeStatus = 'pending' | 'done' | 'failed' | 'skipped' | 'not-applicable' | 'abandoned'
 
 // 'paper'     — fill inserted synchronously from an ORDER_FILLED engine event.
 // 'reconciler' — fill inserted by the reconciliation poller after seeing a CLOB
@@ -28,7 +28,9 @@ export interface RealFillRow {
   hedgeStatus: HedgeStatus
   txHash: string | null
   clobTradeId: string | null
+  tokenId: string | null
   source: RealFillSource
+  hedgeRetryCount: number
 }
 
 @Injectable()
@@ -57,7 +59,9 @@ export class RealFillRepo {
         hedgeStatus: f.hedgeStatus,
         txHash: f.txHash,
         clobTradeId: f.clobTradeId,
+        tokenId: f.tokenId,
         source: f.source,
+        hedgeRetryCount: f.hedgeRetryCount,
       },
       update: {
         hedgeOrderId: f.hedgeOrderId,
@@ -85,11 +89,20 @@ export class RealFillRepo {
     })
   }
 
+  async incrementRetryCount(id: string): Promise<number> {
+    const updated = await this.prisma.realFill.update({
+      where: { id },
+      data: { hedgeRetryCount: { increment: 1 } },
+      select: { hedgeRetryCount: true },
+    })
+    return updated.hedgeRetryCount
+  }
+
   async readUnhedged(maxAgeMs = 7 * 24 * 60 * 60 * 1000): Promise<RealFillRow[]> {
     const since = new Date(Date.now() - maxAgeMs)
     const rows = await this.prisma.realFill.findMany({
       where: {
-        hedgeStatus: { in: ['skipped', 'failed'] },
+        hedgeStatus: { in: ['skipped', 'failed'] as string[] },
         filledAt: { gte: since },
         // Only retry fills tied to a confirmed on-chain CLOB trade.
         // Fills with clobTradeId=null came from paper-engine skips or backfills
@@ -137,7 +150,9 @@ export class RealFillRepo {
     hedgeStatus: string
     txHash: string | null
     clobTradeId: string | null
+    tokenId: string | null
     source: string
+    hedgeRetryCount: number
   }): RealFillRow {
     return {
       id: r.id,
@@ -158,7 +173,9 @@ export class RealFillRepo {
       hedgeStatus: r.hedgeStatus as HedgeStatus,
       txHash: r.txHash,
       clobTradeId: r.clobTradeId,
+      tokenId: r.tokenId,
       source: r.source as RealFillSource,
+      hedgeRetryCount: r.hedgeRetryCount,
     }
   }
 }

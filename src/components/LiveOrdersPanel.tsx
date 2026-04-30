@@ -281,6 +281,7 @@ export function LiveOrdersPanel() {
               <th>Side</th>
               <th>Price</th>
               <th>Size</th>
+              <th>USD</th>
               <th>Filled</th>
               <th>Status</th>
               <th>Posted</th>
@@ -310,6 +311,7 @@ export function LiveOrdersPanel() {
                     </td>
                     <td className="num">{formatPrice(o.price)}</td>
                     <td className="num">{o.size.toFixed(0)}</td>
+                    <td className="num">{formatPrice(o.price * o.size)}</td>
                     <td className="num">{o.filledSize > 0 ? o.filledSize.toFixed(2) : '—'}</td>
                     <td style={{ color: realStatusColor(o.status), fontSize: '0.82rem' }}>{o.status}</td>
                     <td className="dim">{formatShortTime(o.postedAt, timezone)}</td>

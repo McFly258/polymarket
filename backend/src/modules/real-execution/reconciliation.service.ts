@@ -29,6 +29,11 @@ const PRICE_DIV_THRESHOLD = 0.01
 // decimal math can leave ~1e-9 residue on "fully filled" orders.
 const SIZE_EPSILON = 1e-6
 
+// After this many consecutive hedge failures a fill is marked 'abandoned' and
+// permanently removed from the retry queue. Protects against infinite loops on
+// unhedgeable fills (balance=0, market resolved, notional cap, etc.).
+const HEDGE_MAX_RETRIES = 5
+
 // syncWalletFills runs every reconciler tick using a persistent cursor stored
 // in real_execution_state.wallet_sync_cursor_at, so it survives restarts and
 // never misses trades even after extended downtime. On first boot the cursor
@@ -212,12 +217,15 @@ export class ReconciliationService implements OnModuleInit, OnApplicationShutdow
     const batch = fills.slice(0, 10)
     for (const fill of batch) {
       try {
-        // Resolve tokenId: primary path via decisionId, fallback via realOrderId,
-        // last-resort via clobTradeId (wallet-sync fills: 'tx-{txHash}-{assetId}').
-        const order =
-          (await this.orderRepo.findByDecisionId(fill.decisionId)) ??
-          (await this.orderRepo.findById(fill.realOrderId))
-        let tokenId = order?.tokenId
+        // Resolve tokenId: stored directly on the fill (reconciler fills), then
+        // via order lookup (paper fills), last-resort via clobTradeId extraction.
+        let tokenId = fill.tokenId ?? undefined
+        if (!tokenId) {
+          const order =
+            (await this.orderRepo.findByDecisionId(fill.decisionId)) ??
+            (await this.orderRepo.findById(fill.realOrderId))
+          tokenId = order?.tokenId
+        }
         if (!tokenId && fill.clobTradeId) {
           const lastSegment = fill.clobTradeId.split('-').pop()
           if (lastSegment && /^\d{10,}$/.test(lastSegment)) tokenId = lastSegment
@@ -238,9 +246,15 @@ export class ReconciliationService implements OnModuleInit, OnApplicationShutdow
         }
         await this.broker.retryHedge(fill, tokenId, noTokenId)
       } catch (err) {
-        this.logger.warn(
-          `retryUnhedgedFills error for fill ${fill.id}: ${err instanceof Error ? err.message : String(err)}`,
-        )
+        const msg = err instanceof Error ? err.message : String(err)
+        this.logger.warn(`retryUnhedgedFills error for fill ${fill.id}: ${msg}`)
+        const newCount = await this.fillRepo.incrementRetryCount(fill.id)
+        if (newCount >= HEDGE_MAX_RETRIES) {
+          await this.fillRepo.updateHedge(fill.id, null, 'abandoned')
+          this.logger.warn(
+            `retryUnhedgedFills: fill ${fill.id} abandoned after ${newCount} failures (last: ${msg})`,
+          )
+        }
       }
     }
   }
@@ -366,7 +380,9 @@ export class ReconciliationService implements OnModuleInit, OnApplicationShutdow
           hedgeStatus,
           txHash: asString(t['transaction_hash']) ?? null,
           clobTradeId: tradeId,
+          tokenId: tokenId ?? null,
           source: 'reconciler',
+          hedgeRetryCount: 0,
         })
         ingested++
         if (tokenId) this.logger.debug(`wallet-sync ingested trade ${tradeId} token=${tokenId}`)
