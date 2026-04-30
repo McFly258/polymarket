@@ -177,12 +177,12 @@ export class ClobBroker implements OnModuleInit, OnApplicationShutdown {
           OrderType.FOK,
         )) as Record<string, unknown>
         if (!r['success']) {
-          // FOK failed (insufficient liquidity) — retry as GTC so the order posts to the book
+          // FOK failed (insufficient liquidity) — post a GTC limit sell so it fills as bids arrive
           this.logger.warn(
-            `${phase} sell ${tokenId.slice(0, 8)}: FOK failed (${String(r['errorMsg'] ?? r['error'] ?? 'unknown')}), retrying as GTC`,
+            `${phase} sell ${tokenId.slice(0, 8)}: FOK failed (${String(r['errorMsg'] ?? r['error'] ?? 'unknown')}), retrying as GTC limit`,
           )
-          r = (await this.getClient().createAndPostMarketOrder(
-            { tokenID: tokenId, amount: size, side: Side.SELL, price: limitPrice },
+          r = (await this.getClient().createAndPostOrder(
+            { tokenID: tokenId, price: limitPrice, size, side: Side.SELL },
             undefined,
             OrderType.GTC,
           )) as Record<string, unknown>
