@@ -300,7 +300,11 @@ export class ReconciliationService implements OnModuleInit, OnApplicationShutdow
         conditionId,
         decisionId: latest.decisionId,
         question: latest.question,
-        tokenId: order?.tokenId ?? '',
+        // Fall back to the fill's tokenId when no matching order exists (e.g.
+        // wallet-sync fills whose decisionId is "wallet-sync-tx-...").
+        // Without this fallback, real_positions rows have empty tokenId and the
+        // startup liquidator can't sell them.
+        tokenId: order?.tokenId ?? latest.tokenId ?? '',
         outcome: order?.outcome ?? '',
         bidOrderId: bidFills.length > 0 ? bidFills[bidFills.length - 1].realOrderId : null,
         askOrderId: askFills.length > 0 ? askFills[askFills.length - 1].realOrderId : null,
