@@ -278,6 +278,14 @@ export class ReconciliationService implements OnModuleInit, OnApplicationShutdow
       const askFills = fills.filter((f) => f.side === 'ask')
       const bidSize = bidFills.reduce((s, f) => s + f.size, 0)
       const askSize = askFills.reduce((s, f) => s + f.size, 0)
+      const netSize = bidSize - askSize
+
+      // Position is flat or over-sold — remove it rather than leaving a ghost row.
+      if (netSize <= SIZE_EPSILON) {
+        await this.positionRepo.delete(conditionId)
+        continue
+      }
+
       const bidPrice =
         bidSize > 0 ? bidFills.reduce((s, f) => s + f.fillPrice * f.size, 0) / bidSize : 0
       const askPrice =
