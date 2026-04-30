@@ -709,6 +709,7 @@ export class ClobBroker implements OnModuleInit, OnApplicationShutdown {
     let clobOrderId = `prepost-${paperOrder.id}`
     let status: RealOrderRow['status'] = dispatch ? 'pending' : 'skipped'
     let rejectReason: string | null = null
+    let postedSize = paperOrder.size
 
     if (dispatch && paperOrder.size < CLOB_MIN_SIZE) {
       status = 'rejected'
@@ -719,6 +720,7 @@ export class ClobBroker implements OnModuleInit, OnApplicationShutdown {
       let cappedSize = paperOrder.size
       if (notional > this.maxNotional) {
         cappedSize = Math.floor(this.maxNotional / realPrice)
+        postedSize = cappedSize
         this.logger.log(`onOrderPlaced: size capped ${paperOrder.size}→${cappedSize} for notional cap (decision ${decisionId})`)
       }
       if (cappedSize < CLOB_MIN_SIZE) {
@@ -772,7 +774,7 @@ export class ClobBroker implements OnModuleInit, OnApplicationShutdown {
       outcome: paperOrder.outcome,
       side: paperOrder.side,
       price: paperOrder.price,
-      size: paperOrder.size,
+      size: postedSize,
       filledSize: 0,
       status,
       rejectReason,
@@ -878,6 +880,9 @@ export class ClobBroker implements OnModuleInit, OnApplicationShutdown {
     const filledAt = paperFill.filledAt
     const dispatch = await this.dispatchAllowed()
     const realFillId = `rfill-${paperFill.id}`
+    const realOrder = await this.orderRepo.findByDecisionId(decisionId)
+    // Cap fill size to what was actually posted to CLOB (may be less than paper fill if notional-capped)
+    const effectiveFillSize = realOrder ? Math.min(paperFill.size, realOrder.size) : paperFill.size
 
     let hedgeOrderId: string | null = null
     let actualHedgePrice = hedgeFillPrice
@@ -902,7 +907,7 @@ export class ClobBroker implements OnModuleInit, OnApplicationShutdown {
       const realTokenId = useNoSell ? noTokenId! : tokenId
       const realHedgeSide = useNoSell ? Side.SELL : (hedgeSide === 'buy' ? Side.BUY : Side.SELL)
       const realHedgePrice = useNoSell ? 1 - hedgeFillPrice : hedgeFillPrice
-      const notional = realHedgePrice * paperFill.size
+      const notional = realHedgePrice * effectiveFillSize
       if (notional > this.maxNotional) {
         hedgeStatus = 'failed'
         this.logger.warn(
@@ -913,8 +918,8 @@ export class ClobBroker implements OnModuleInit, OnApplicationShutdown {
           // SDK semantics: BUY amount = USDC to spend; SELL amount = shares to sell.
           const hedgeAmount =
             realHedgeSide === Side.BUY
-              ? realHedgePrice * paperFill.size
-              : paperFill.size
+              ? realHedgePrice * effectiveFillSize
+              : effectiveFillSize
           const resp = await this.getClient().createAndPostMarketOrder(
             {
               tokenID: realTokenId,
