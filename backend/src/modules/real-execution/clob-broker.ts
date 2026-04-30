@@ -162,10 +162,13 @@ export class ClobBroker implements OnModuleInit, OnApplicationShutdown {
     }
     this.logger.log(`${phase}: liquidating ${held.length} position(s)`)
     for (const pos of held) {
-      const tokenId = String(pos['asset_id'] ?? pos['token_id'] ?? '')
+      const tokenId = String(pos['asset_id'] ?? pos['token_id'] ?? pos['asset'] ?? '')
       const size = Number(pos['size'] ?? 0)
       const curPrice = Number(pos['curPrice'] ?? pos['price'] ?? 0.5)
-      if (!tokenId || size < 0.01) continue
+      if (!tokenId || size < 0.01) {
+        this.logger.warn(`${phase}: skipping position — missing tokenId or size too small (size=${size})`)
+        continue
+      }
       const limitPrice = Math.max(curPrice - 0.01, 0.01)
       try {
         const r = (await this.getClient().createAndPostMarketOrder(
