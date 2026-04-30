@@ -476,7 +476,7 @@ export class ClobBroker implements OnModuleInit, OnApplicationShutdown {
       this.logger.warn(
         `retryHedge: notional $${notional.toFixed(2)} > max — fill ${fill.id} skipped`,
       )
-      return
+      throw new Error(`notional $${notional.toFixed(2)} > max`)
     }
 
     let hedgeOrderId: string | null = null

@@ -46,7 +46,7 @@ export const DEFAULT_STRATEGY: StrategyConfig = {
   topUpWinnersEnabled: true,
   topUpMultiplier: 2,
   softFallbackEnabled: true,
-  subMinFallbackEnabled: true,
+  subMinFallbackEnabled: false,
   softFallbackCapitalFraction: 1.0,
   softFallbackMinSharePct: 0,
   softFallbackMinYieldPct: 0.02,
@@ -207,6 +207,7 @@ function allocateMarket(
   // each side's qualifying depth (USD inside the reward zone) to be ≥ multiple
   // × our per-side notional.
   const hedgeMult = config.minHedgeDepthMultiple ?? DEFAULT_STRATEGY.minHedgeDepthMultiple ?? 0
+  // Cheap pre-gate using base capital — markets that can't even hedge baseline are out.
   if (hedgeMult > 0) {
     const perSideNotional = config.perMarketCapitalUsd / 2
     const needed = hedgeMult * perSideNotional
@@ -230,12 +231,29 @@ function allocateMarket(
   const bidPrice = Math.max(tick, roundToTick(bidPriceRaw, tick, 'down'))
   const askPrice = Math.min(1 - tick, roundToTick(askPriceRaw, tick, 'up'))
 
-  const totalCapital = config.perMarketCapitalUsd
+  const minSize = row.rewardMinSize
+  // Required notional to clear reward floor on both sides at posted prices.
+  // 5% headroom keeps us safely above the threshold after rounding.
+  const floorRequiredCapital = minSize * (bidPrice + askPrice) * 1.05
+  // Auto-bump per-market capital up to topUpMultiplier × base when needed to hit the
+  // reward floor on both sides. Markets that still can't fit fall through to the
+  // primary-pass rejection (enforceRewardMinSize) or the soft fallback.
+  const baseCapital = config.perMarketCapitalUsd
+  const topUpMult = config.topUpMultiplier ?? 2
+  const maxCapital = baseCapital * topUpMult
+  const totalCapital = Math.min(maxCapital, Math.max(baseCapital, floorRequiredCapital))
   const halfCapital = totalCapital / 2
+
+  // Re-check hedge depth at the (possibly bumped) per-side notional.
+  if (hedgeMult > 0) {
+    const needed = hedgeMult * halfCapital
+    if (yesBook.qualifyingBidDepthUsd < needed) return null
+    if (yesBook.qualifyingAskDepthUsd < needed) return null
+  }
+
   // Asymmetric sizing is computed after share scores — placeholder shares for score calculation
   const bidShares = halfCapital / Math.max(bidPrice, 0.01)
   const askShares = halfCapital / Math.max(askPrice, 0.01)
-  const minSize = row.rewardMinSize
   const bidBelowMin = bidShares < minSize
   const askBelowMin = askShares < minSize
 
@@ -278,12 +296,24 @@ function allocateMarket(
   // Asymmetric per-side sizing: split total capital proportionally to share, clamped [30%, 70%].
   // When one side dominates (e.g. bid 80% share, ask 5%), put more capital on the dominant side
   // to earn more rewards. Total notional stays the same — zero risk delta.
+  // Clamp window also respects reward-min: each side must hold ≥ minSize × price notional
+  // so the asym split never drives a side below the LP reward floor.
   const asymEnabled = config.asymmetricSizingEnabled !== false // default true
   let bidCapitalUsd = halfCapital
   let askCapitalUsd = halfCapital
   if (asymEnabled && bidSideShare + askSideShare > 0) {
     const rawBidFrac = bidSideShare / (bidSideShare + askSideShare)
-    const bidFrac = Math.min(0.7, Math.max(0.3, rawBidFrac))
+    // Reward-floor feasibility window. If totalCapital is large enough to meet the
+    // floor on both sides, this gives the [min, max] bid-fraction interval that
+    // keeps both sides at/above rewardMinSize. If infeasible (window inverted),
+    // fall back to the static [0.3, 0.7] clamp.
+    const bidFloorFrac = (minSize * bidPrice) / totalCapital
+    const askFloorFrac = (minSize * askPrice) / totalCapital
+    const lower = Math.max(0.3, bidFloorFrac)
+    const upper = Math.min(0.7, 1 - askFloorFrac)
+    const bidFrac = lower <= upper
+      ? Math.min(upper, Math.max(lower, rawBidFrac))
+      : Math.min(0.7, Math.max(0.3, rawBidFrac))
     bidCapitalUsd = totalCapital * bidFrac
     askCapitalUsd = totalCapital * (1 - bidFrac)
   }
