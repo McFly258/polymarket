@@ -191,7 +191,9 @@ export class ClobBroker implements OnModuleInit, OnApplicationShutdown {
         this.logger.warn(`${phase}: skipping position — missing tokenId or size too small (size=${size})`)
         return
       }
-      const limitPrice = Math.max(curPrice - 0.01, 0.01)
+      // Walk the limit price down 1 cent per attempt — improves FOK fill probability
+      // without resorting to GTC (which can partially fill and leave sub-minimum residuals).
+      const limitPrice = Math.max(curPrice - 0.01 * attempt, 0.01)
       try {
         // On retries, cancel any existing open orders for this token first
         if (attempt > 1) {
@@ -204,24 +206,16 @@ export class ClobBroker implements OnModuleInit, OnApplicationShutdown {
             }
           }
         }
-        let r = (await this.getClient().createAndPostMarketOrder(
+        const r = (await this.getClient().createAndPostMarketOrder(
           { tokenID: tokenId, amount: size, side: Side.SELL, price: limitPrice },
           undefined,
           OrderType.FOK,
         )) as Record<string, unknown>
-        if (!r['success']) {
-          // FOK failed (insufficient liquidity) — post a GTC limit sell so it fills as bids arrive
-          this.logger.warn(
-            `${phase} sell ${tokenId.slice(0, 8)}: FOK failed (${String(r['errorMsg'] ?? r['error'] ?? 'unknown')}), retrying as GTC limit`,
-          )
-          r = (await this.getClient().createAndPostOrder(
-            { tokenID: tokenId, price: limitPrice, size, side: Side.SELL },
-            undefined,
-            OrderType.GTC,
-          )) as Record<string, unknown>
-        }
+        // FOK-only: no GTC fallback. GTC partial fills can leave sub-minimum residuals
+        // that are permanently unliquidatable. If FOK fails, the retry loop will attempt
+        // again with a lower price until the position clears or retries are exhausted.
         this.logger.log(
-          `${phase} sell ${tokenId.slice(0, 8)}${attempt > 1 ? ` (attempt ${attempt})` : ''}: ${r['success'] ? 'done' : `failed — ${String(r['errorMsg'] ?? r['error'] ?? 'unknown')}`}`,
+          `${phase} sell ${tokenId.slice(0, 8)}${attempt > 1 ? ` (attempt ${attempt}, limit ${limitPrice.toFixed(3)})` : ''}: ${r['success'] ? 'done' : `FOK failed — ${String(r['errorMsg'] ?? r['error'] ?? 'unknown')} (will retry)`}`,
         )
       } catch (err) {
         this.logger.error(
