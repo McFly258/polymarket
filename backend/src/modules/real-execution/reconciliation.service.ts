@@ -212,11 +212,16 @@ export class ReconciliationService implements OnModuleInit, OnApplicationShutdow
     const batch = fills.slice(0, 10)
     for (const fill of batch) {
       try {
-        // Resolve tokenId: primary path via decisionId, fallback via realOrderId.
+        // Resolve tokenId: primary path via decisionId, fallback via realOrderId,
+        // last-resort via clobTradeId (wallet-sync fills: 'tx-{txHash}-{assetId}').
         const order =
           (await this.orderRepo.findByDecisionId(fill.decisionId)) ??
           (await this.orderRepo.findById(fill.realOrderId))
-        const tokenId = order?.tokenId
+        let tokenId = order?.tokenId
+        if (!tokenId && fill.clobTradeId) {
+          const lastSegment = fill.clobTradeId.split('-').pop()
+          if (lastSegment && /^\d{10,}$/.test(lastSegment)) tokenId = lastSegment
+        }
         if (!tokenId) {
           this.logger.warn(`retryUnhedgedFills: no tokenId for fill ${fill.id}, skipping`)
           continue
