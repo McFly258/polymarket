@@ -146,31 +146,42 @@ export class ClobBroker implements OnModuleInit, OnApplicationShutdown {
     const userAddress = this.funderAddress ?? eoa
     if (!userAddress) return
 
-    const resp = await fetch(
-      `https://data-api.polymarket.com/positions?user=${userAddress}&sizeThreshold=0.01`,
-    )
-    if (!resp.ok) {
-      this.logger.warn(`${phase}: positions fetch failed (${resp.status})`)
-      return
+    const fetchHeld = async (): Promise<Array<Record<string, unknown>>> => {
+      const r = await fetch(
+        `https://data-api.polymarket.com/positions?user=${userAddress}&sizeThreshold=0.01`,
+      )
+      if (!r.ok) {
+        this.logger.warn(`${phase}: positions fetch failed (${r.status})`)
+        return []
+      }
+      const positions = (await r.json()) as Array<Record<string, unknown>>
+      return positions.filter((p) => Number(p['size'] ?? 0) > 0.01)
     }
-    const positions = (await resp.json()) as Array<Record<string, unknown>>
-    const held = positions.filter((p) => Number(p['size'] ?? 0) > 0.01)
 
-    if (!held.length) {
-      this.logger.log(`${phase}: no inventory to liquidate`)
-      return
-    }
-    this.logger.log(`${phase}: liquidating ${held.length} position(s)`)
-    for (const pos of held) {
+    const sellPosition = async (
+      pos: Record<string, unknown>,
+      attempt: number,
+    ): Promise<void> => {
       const tokenId = String(pos['asset_id'] ?? pos['token_id'] ?? pos['asset'] ?? '')
       const size = Number(pos['size'] ?? 0)
       const curPrice = Number(pos['curPrice'] ?? pos['price'] ?? 0.5)
       if (!tokenId || size < 0.01) {
         this.logger.warn(`${phase}: skipping position — missing tokenId or size too small (size=${size})`)
-        continue
+        return
       }
       const limitPrice = Math.max(curPrice - 0.01, 0.01)
       try {
+        // On retries, cancel any existing open orders for this token first
+        if (attempt > 1) {
+          const openOrders = (await this.getClient().getOpenOrders({ asset_id: tokenId })) as unknown as Array<Record<string, unknown>>
+          if (openOrders.length) {
+            const ids = openOrders.map((o) => String(o['id'] ?? o['order_id'] ?? '')).filter(Boolean)
+            if (ids.length) {
+              await this.getClient().cancelOrders(ids)
+              this.logger.log(`${phase} sell ${tokenId.slice(0, 8)}: cancelled ${ids.length} stale order(s) before retry`)
+            }
+          }
+        }
         let r = (await this.getClient().createAndPostMarketOrder(
           { tokenID: tokenId, amount: size, side: Side.SELL, price: limitPrice },
           undefined,
@@ -188,13 +199,39 @@ export class ClobBroker implements OnModuleInit, OnApplicationShutdown {
           )) as Record<string, unknown>
         }
         this.logger.log(
-          `${phase} sell ${tokenId.slice(0, 8)}: ${r['success'] ? 'done' : `failed — ${String(r['errorMsg'] ?? r['error'] ?? 'unknown')}`}`,
+          `${phase} sell ${tokenId.slice(0, 8)}${attempt > 1 ? ` (attempt ${attempt})` : ''}: ${r['success'] ? 'done' : `failed — ${String(r['errorMsg'] ?? r['error'] ?? 'unknown')}`}`,
         )
       } catch (err) {
         this.logger.error(
           `${phase} liquidate ${tokenId.slice(0, 8)} failed: ${err instanceof Error ? err.message : String(err)}`,
         )
       }
+    }
+
+    const held = await fetchHeld()
+    if (!held.length) {
+      this.logger.log(`${phase}: no inventory to liquidate`)
+      return
+    }
+    this.logger.log(`${phase}: liquidating ${held.length} position(s)`)
+    for (const pos of held) await sellPosition(pos, 1)
+
+    // Retry loop: re-check for partial fills and re-post for any remaining shares
+    const MAX_RETRIES = 5
+    const RETRY_DELAY_MS = 10_000
+    for (let attempt = 2; attempt <= MAX_RETRIES + 1; attempt++) {
+      await new Promise((res) => setTimeout(res, RETRY_DELAY_MS))
+      const remaining = await fetchHeld()
+      if (!remaining.length) {
+        this.logger.log(`${phase}: all positions liquidated`)
+        return
+      }
+      this.logger.warn(`${phase}: ${remaining.length} position(s) still remain (attempt ${attempt}), re-posting sell orders`)
+      for (const pos of remaining) await sellPosition(pos, attempt)
+    }
+    const stillRemaining = await fetchHeld()
+    if (stillRemaining.length) {
+      this.logger.warn(`${phase}: ${stillRemaining.length} position(s) still remain after all retries — manual intervention may be needed`)
     }
   }
 
