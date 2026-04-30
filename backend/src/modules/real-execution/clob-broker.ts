@@ -893,7 +893,7 @@ export class ClobBroker implements OnModuleInit, OnApplicationShutdown {
     const filledAt = paperFill.filledAt
     const dispatch = await this.dispatchAllowed()
     const realFillId = `rfill-${paperFill.id}`
-    const realOrder = await this.orderRepo.findByDecisionId(decisionId)
+    const realOrder = decisionId ? await this.orderRepo.findByDecisionId(decisionId) : null
     // Cap fill size to what was actually posted to CLOB (may be less than paper fill if notional-capped)
     const effectiveFillSize = realOrder ? Math.min(paperFill.size, realOrder.size) : paperFill.size
 
