@@ -14,6 +14,7 @@ import type { RealFillRow } from './real-fill.repo'
 import type { RealOrderRow } from './real-order.repo'
 import { RealFillRepo } from './real-fill.repo'
 import { RealOrderRepo } from './real-order.repo'
+import { RealPositionRepo } from './real-position.repo'
 import { RealStateRepo } from './real-state.repo'
 
 const CLOB_BASE = 'https://clob.polymarket.com'
@@ -55,6 +56,7 @@ export class ClobBroker implements OnModuleInit, OnApplicationShutdown {
     private readonly orderRepo: RealOrderRepo,
     private readonly fillRepo: RealFillRepo,
     private readonly stateRepo: RealStateRepo,
+    private readonly positionRepo: RealPositionRepo,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -227,6 +229,22 @@ export class ClobBroker implements OnModuleInit, OnApplicationShutdown {
             this.logger.warn(
               `${phase} sell ${tokenId.slice(0, 8)}: wallet balance is 0 — stale data-API record (ghost position), skipping retries`,
             )
+            // Remove the stale DB record so it can't re-surface on the next restart.
+            try {
+              const allPos = await this.positionRepo.readAll()
+              for (const p of allPos) {
+                if (String(p.tokenId) === tokenId || p.tokenId === '') {
+                  await this.positionRepo.delete(p.conditionId)
+                  this.logger.log(
+                    `${phase} cleanup: deleted ghost real_position conditionId=${p.conditionId.slice(0, 16)}`,
+                  )
+                }
+              }
+            } catch (cleanupErr) {
+              this.logger.warn(
+                `${phase} cleanup failed for ghost ${tokenId.slice(0, 8)}: ${cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr)}`,
+              )
+            }
           } else {
             this.logger.log(
               `${phase} sell ${tokenId.slice(0, 8)}${attempt > 1 ? ` (attempt ${attempt}, limit ${limitPrice.toFixed(3)})` : ''}: FOK failed — ${errMsg} (will retry)`,
