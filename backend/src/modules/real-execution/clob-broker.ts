@@ -146,6 +146,12 @@ export class ClobBroker implements OnModuleInit, OnApplicationShutdown {
     const userAddress = this.funderAddress ?? eoa
     if (!userAddress) return
 
+    // Polymarket CLOB rejects orders smaller than 5 shares, so positions below
+    // that threshold are unliquidatable dust. We surface them once then exclude
+    // them from the work list so the retry loop can converge.
+    const CLOB_MIN_SIZE = 5
+    const dustLogged = new Set<string>()
+
     const fetchHeld = async (): Promise<Array<Record<string, unknown>>> => {
       const r = await fetch(
         `https://data-api.polymarket.com/positions?user=${userAddress}&sizeThreshold=0.01`,
@@ -155,7 +161,23 @@ export class ClobBroker implements OnModuleInit, OnApplicationShutdown {
         return []
       }
       const positions = (await r.json()) as Array<Record<string, unknown>>
-      return positions.filter((p) => Number(p['size'] ?? 0) > 0.01)
+      const live = positions.filter((p) => Number(p['size'] ?? 0) > 0.01)
+      const sellable: Array<Record<string, unknown>> = []
+      for (const p of live) {
+        const size = Number(p['size'] ?? 0)
+        if (size < CLOB_MIN_SIZE) {
+          const tokenId = String(p['asset_id'] ?? p['token_id'] ?? p['asset'] ?? '')
+          if (tokenId && !dustLogged.has(tokenId)) {
+            dustLogged.add(tokenId)
+            this.logger.warn(
+              `${phase}: dust position ${tokenId.slice(0, 8)} size=${size} below CLOB minimum (${CLOB_MIN_SIZE}) — cannot liquidate via orderbook, skipping`,
+            )
+          }
+          continue
+        }
+        sellable.push(p)
+      }
+      return sellable
     }
 
     const sellPosition = async (
