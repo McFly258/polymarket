@@ -23,6 +23,7 @@ import type {
   MarketVolatility,
   RewardsRow,
   StrategyAllocation,
+  StrategyConfig,
 } from '../../domain/strategy.types'
 import { BROKER_TOKEN, type Broker, type PlaceOrderRequest } from '../../domain/broker.types'
 import { FillRepo } from '../persistence/fill.repo'
@@ -68,7 +69,8 @@ export class EngineAllocService {
       return
     }
     const vol = this.data.loadVolatility(s.midPriceHistory)
-    const sim = runSimulation(rows, s.config, vol)
+    const effectiveConfig = await this.capConfigToFreeBalance(s.config)
+    const sim = runSimulation(rows, effectiveConfig, vol)
     const byCondition = new Map(sim.allocations.map((a) => [a.conditionId, a]))
     const rowsById = new Map(rows.map((r) => [r.conditionId, r]))
     s.lastAllocSet = new Set(sim.allocations.map((a) => a.conditionId))
@@ -369,6 +371,32 @@ export class EngineAllocService {
     await this.positionRepo.delete(conditionId)
   }
 
+  // Caps the simulator's totalCapitalUsd to the live wallet balance with a
+  // safety margin. Without this the engine plans deployments that exceed the
+  // wallet (especially when the configured capital is higher than balance, or
+  // during the cancel/repost race where prior orders still reserve capacity at
+  // the CLOB), producing "not enough balance / allowance" rejections.
+  // Paper broker: returns config unchanged.
+  private async capConfigToFreeBalance(config: StrategyConfig): Promise<StrategyConfig> {
+    if (!this.clobBroker.isEnabled()) return config
+    let balanceUsdc: number
+    try {
+      const snap = await this.clobBroker.getBalance()
+      balanceUsdc = snap.balanceUsdc
+    } catch (err) {
+      this.logger.warn(`capConfigToFreeBalance: getBalance failed, using config as-is: ${(err as Error).message}`)
+      return config
+    }
+    // 10% headroom absorbs taker/maker fees and the cancel-vs-repost race at
+    // the CLOB (old orders may still reserve allowance when new ones are sent).
+    const cap = balanceUsdc * 0.9
+    if (cap >= config.totalCapitalUsd) return config
+    this.logger.log(
+      `  capping totalCapitalUsd: configured=$${config.totalCapitalUsd.toFixed(2)} → free=$${cap.toFixed(2)} (wallet $${balanceUsdc.toFixed(2)} × 0.9)`,
+    )
+    return { ...config, totalCapitalUsd: cap }
+  }
+
   async repositionMarket(s: EngineRuntimeState, conditionId: string): Promise<void> {
     if (s.state !== 'running' || !s.config) return
     if (s.positions.has(conditionId)) return
@@ -385,7 +413,8 @@ export class EngineAllocService {
       return
     }
     const vol = this.data.loadVolatility(s.midPriceHistory)
-    const sim = runSimulation(rows, s.config, vol)
+    const effectiveConfig = await this.capConfigToFreeBalance(s.config)
+    const sim = runSimulation(rows, effectiveConfig, vol)
     const alloc = sim.allocations.find((a) => a.conditionId === conditionId)
     const row = rows.find((r) => r.conditionId === conditionId)
     if (!alloc || !row) {
