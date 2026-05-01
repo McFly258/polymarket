@@ -27,6 +27,10 @@ export interface EngineRuntimeState {
   // Timestamp (ms) of last closePosition liquidation per conditionId. sweepOrphans
   // checks this to avoid re-adopting a position before the reconciler catches up.
   liquidationCooldown: Map<string, number>
+  // Rolling mid-price samples per conditionId for C6 volatility. Populated from
+  // WS book ticks (throttled to one sample per REALLOC_MS). Pruned to 24h window.
+  midPriceHistory: Map<string, { ts: number; mid: number }[]>
+  midPriceLastSampled: Map<string, number>
 }
 
 export function createEngineRuntimeState(): EngineRuntimeState {
@@ -47,6 +51,8 @@ export function createEngineRuntimeState(): EngineRuntimeState {
     ws: null,
     lastAllocSet: new Set(),
     liquidationCooldown: new Map(),
+    midPriceHistory: new Map(),
+    midPriceLastSampled: new Map(),
   }
 }
 

@@ -67,7 +67,7 @@ export class EngineAllocService {
       this.logger.error('fetch failed during realloc, keeping existing positions', err as Error)
       return
     }
-    const vol = this.data.loadVolatility()
+    const vol = this.data.loadVolatility(s.midPriceHistory)
     const sim = runSimulation(rows, s.config, vol)
     const byCondition = new Map(sim.allocations.map((a) => [a.conditionId, a]))
     const rowsById = new Map(rows.map((r) => [r.conditionId, r]))
@@ -384,7 +384,7 @@ export class EngineAllocService {
       this.logger.error(`reposition ${tag} — fetch failed`, err as Error)
       return
     }
-    const vol = this.data.loadVolatility()
+    const vol = this.data.loadVolatility(s.midPriceHistory)
     const sim = runSimulation(rows, s.config, vol)
     const alloc = sim.allocations.find((a) => a.conditionId === conditionId)
     const row = rows.find((r) => r.conditionId === conditionId)

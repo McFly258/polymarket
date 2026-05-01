@@ -9,6 +9,7 @@ import {
   INVENTORY_BIAS_DECAY_MS,
   MAX_HEDGE_SLIPPAGE,
   MAX_HEDGE_SLIPPAGE_ABS,
+  REALLOC_MS,
   REPOSITION_DELAY_MS,
   TICK,
 } from '../../domain/constants'
@@ -58,6 +59,19 @@ export class EngineFillService {
     pos.midPrice = view.mid
     pos.bestBid = view.bestBid
     pos.bestAsk = view.bestAsk
+
+    // C6 data: sample mid into rolling history (throttled to one per REALLOC_MS)
+    if (view.mid !== null) {
+      const now = Date.now()
+      const lastSampled = s.midPriceLastSampled.get(pos.conditionId) ?? 0
+      if (now - lastSampled >= REALLOC_MS) {
+        const hist = s.midPriceHistory.get(pos.conditionId) ?? []
+        hist.push({ ts: now, mid: view.mid })
+        const cutoff = now - 24 * 60 * 60 * 1000
+        s.midPriceHistory.set(pos.conditionId, hist.filter((h) => h.ts >= cutoff))
+        s.midPriceLastSampled.set(pos.conditionId, now)
+      }
+    }
 
     // C5: MTM stop-loss — mid has moved far enough against our resting price
     // that a fill would be unhedgeable without a large loss. Cancel and blacklist.
