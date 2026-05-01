@@ -380,6 +380,7 @@ export class EngineAllocService {
   private async capConfigToFreeBalance(config: StrategyConfig): Promise<StrategyConfig> {
     if (!this.clobBroker.isEnabled()) return config
     let balanceUsdc: number
+    let reservedUsdc = 0
     try {
       const snap = await this.clobBroker.getBalance()
       balanceUsdc = snap.balanceUsdc
@@ -387,12 +388,19 @@ export class EngineAllocService {
       this.logger.warn(`capConfigToFreeBalance: getBalance failed, using config as-is: ${(err as Error).message}`)
       return config
     }
-    // 10% headroom absorbs taker/maker fees and the cancel-vs-repost race at
-    // the CLOB (old orders may still reserve allowance when new ones are sent).
-    const cap = balanceUsdc * 0.9
+    try {
+      const openOrders = (await (this.clobBroker as any).getClient().getOpenOrders({})) as Array<Record<string, unknown>>
+      // Each open BUY order reserves makerAmount (USDC, 6 decimals) in the proxy allowance.
+      reservedUsdc = openOrders.reduce((sum, o) => sum + Number(o['makerAmount'] ?? 0), 0) / 1_000_000
+    } catch {
+      // Non-fatal: if we can't fetch open orders, fall back to wallet-only cap.
+    }
+    // 10% headroom absorbs fees and the cancel-vs-repost race at the CLOB.
+    const freeUsdc = Math.max(0, balanceUsdc - reservedUsdc)
+    const cap = freeUsdc * 0.9
     if (cap >= config.totalCapitalUsd) return config
     this.logger.log(
-      `  capping totalCapitalUsd: configured=$${config.totalCapitalUsd.toFixed(2)} → free=$${cap.toFixed(2)} (wallet $${balanceUsdc.toFixed(2)} × 0.9)`,
+      `  capping totalCapitalUsd: configured=$${config.totalCapitalUsd.toFixed(2)} → free=$${cap.toFixed(2)} (wallet $${balanceUsdc.toFixed(2)} − reserved $${reservedUsdc.toFixed(2)} = $${freeUsdc.toFixed(2)} × 0.9)`,
     )
     return { ...config, totalCapitalUsd: cap }
   }
