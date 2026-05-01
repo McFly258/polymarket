@@ -344,6 +344,32 @@ export class EngineAllocService {
         at: now,
       } satisfies OrderCancelledEvent)
     }
+
+    // Liquidate held inventory: pair-hedge awaiting second leg, or hedge failure.
+    // Without this the tokens sit in the wallet after stop-loss/drawdown triggers.
+    if (pos.pendingPairFill) {
+      const inventorySide = pos.pendingPairFill === 'bid' ? 'sell' : 'buy'
+      const inventorySize = pos.pendingPairFill === 'bid' ? pos.bidSize : pos.askSize
+      const fillPrice = pos.pendingPairFill === 'bid' ? pos.bidPrice : pos.askPrice
+      this.logger.log(
+        `closePosition ${conditionId.slice(0, 8)} — liquidating ${inventorySide} ${inventorySize} shares (pendingPairFill=${pos.pendingPairFill})`,
+      )
+      void this.broker.marketHedge({
+        conditionId,
+        tokenId: pos.tokenId,
+        side: inventorySide,
+        size: inventorySize,
+        expectedPrice: fillPrice,
+        fillPrice: pos.midPrice ?? fillPrice,
+      }).then(() => {
+        this.logger.log(`closePosition ${conditionId.slice(0, 8)}: inventory liquidated`)
+      }).catch((err: unknown) => {
+        const msg = err instanceof Error ? err.message : String(err)
+        this.logger.warn(`closePosition ${conditionId.slice(0, 8)}: liquidate failed — ${msg} (reconciler will retry)`)
+        notifyTelegram(`⚠️ Inventory liquidation failed for ${conditionId.slice(0, 8)}: ${msg}\nReconciler will retry.`)
+      })
+    }
+
     s.positions.delete(conditionId)
     await this.positionRepo.delete(conditionId)
   }

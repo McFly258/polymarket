@@ -23,6 +23,7 @@ import type { StrategyConfig } from '../../domain/strategy.types'
 import { FillRepo, type FillRow } from '../persistence/fill.repo'
 import { OrderRepo } from '../persistence/order.repo'
 import { PositionRepo } from '../persistence/position.repo'
+import { RealPositionRepo } from '../real-execution/real-position.repo'
 
 import { EngineAllocService } from './engine-alloc.service'
 import type { EngineRuntimeState } from './engine-state'
@@ -37,6 +38,7 @@ export class EngineFillService {
     private readonly orderRepo: OrderRepo,
     private readonly fillRepo: FillRepo,
     private readonly positionRepo: PositionRepo,
+    private readonly realPositionRepo: RealPositionRepo,
     @Inject(forwardRef(() => EngineAllocService)) private readonly alloc: EngineAllocService,
     private readonly events: EventEmitter2,
   ) {}
@@ -86,8 +88,10 @@ export class EngineFillService {
     // C5b: Inventory MTM stop-loss — one side already filled (holding inventory),
     // mid has moved far enough against our fill price that carrying the position
     // is worse than closing now. Complements C5 which only fires on open orders.
-    const longInventory = !pos.bidOrderId && !!pos.askOrderId
-    const shortInventory = !!pos.bidOrderId && !pos.askOrderId
+    // Uses pendingPairFill (not order presence) so it also fires when both orders
+    // are gone but inventory is still held (e.g. hedge order expired/cancelled).
+    const longInventory = pos.pendingPairFill === 'bid'
+    const shortInventory = pos.pendingPairFill === 'ask'
     if (mtmStop > 0 && view.mid !== null && (longInventory || shortInventory)) {
       const longBreached = longInventory && view.mid < pos.bidPrice * (1 - mtmStop)
       const shortBreached = shortInventory && view.mid > pos.askPrice * (1 + mtmStop)
@@ -190,9 +194,10 @@ export class EngineFillService {
         continue
       }
 
-      // C5b-sweep: inventory MTM (one side filled, other still open)
-      const longInventory = !pos.bidOrderId && !!pos.askOrderId
-      const shortInventory = !!pos.bidOrderId && !pos.askOrderId
+      // C5b-sweep: inventory MTM — uses pendingPairFill so it fires even when
+      // both orders are gone but the filled inventory is still being held.
+      const longInventory = pos.pendingPairFill === 'bid'
+      const shortInventory = pos.pendingPairFill === 'ask'
       if (longInventory || shortInventory) {
         const longBreached = longInventory && mid < pos.bidPrice * (1 - mtmStop)
         const shortBreached = shortInventory && mid > pos.askPrice * (1 + mtmStop)
@@ -214,6 +219,58 @@ export class EngineFillService {
           )
         }
       }
+    }
+  }
+
+  // Adopts real_positions (from the reconciler) that are not yet tracked in
+  // s.positions. This catches orphan inventory: fills that happened while the
+  // engine was down, or pair-hedges where both legs completed externally. Once
+  // adopted, C5b and sweepMtm can fire on them like any other held position.
+  async sweepOrphans(s: EngineRuntimeState): Promise<void> {
+    if (s.state !== 'running') return
+    let realPositions: import('../real-execution/real-position.repo').RealPositionRow[]
+    try {
+      realPositions = await this.realPositionRepo.readAll()
+    } catch {
+      return
+    }
+    for (const rp of realPositions) {
+      if (s.positions.has(rp.conditionId)) continue
+      const netLong = rp.bidSize - rp.askSize
+      if (netLong < 1) continue
+      const tag = rp.conditionId.slice(0, 8)
+      this.logger.log(`sweepOrphans: adopting orphan position ${tag} netLong=${netLong.toFixed(2)}`)
+      const orphan: InternalPosition = {
+        conditionId: rp.conditionId,
+        question: rp.question,
+        tokenId: rp.tokenId,
+        outcome: rp.outcome,
+        decisionId: rp.decisionId,
+        bidOrderId: null,
+        askOrderId: null,
+        bidPrice: rp.bidPrice,
+        askPrice: rp.askPrice,
+        bidSize: netLong,
+        askSize: rp.askSize,
+        maxSpreadDollars: 0,
+        dailyPool: 0,
+        midPrice: null,
+        bestBid: null,
+        bestAsk: null,
+        rewardSharePct: 0,
+        expectedRatePerDay: 0,
+        capitalUsd: rp.capitalUsd,
+        totalEarnedUsd: 0,
+        earnedSinceLastSnapshot: 0,
+        ourScore: 0,
+        totalScore: 0,
+        latestBook: null,
+        pendingPairFill: 'bid',
+      }
+      s.positions.set(rp.conditionId, orphan)
+      notifyTelegram(
+        `⚠️ Orphan position adopted: ${tag}\nNet long ${netLong.toFixed(2)} shares @ avg ${rp.bidPrice.toFixed(3)}\nMTM stop-loss now active.`,
+      )
     }
   }
 
@@ -339,6 +396,9 @@ export class EngineFillService {
         await this.fillRepo.updateHedge(fillId, hedgeRes.id, 'done')
       } catch {
         await this.fillRepo.updateHedge(fillId, null, 'failed')
+        // Mark inventory so C5b MTM and closePosition can see and liquidate it.
+        // The reconciler's retryUnhedgedFills will also retry the hedge.
+        pos.pendingPairFill = side
       }
     }
 

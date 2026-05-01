@@ -116,6 +116,10 @@ export class EngineService implements OnModuleInit, OnApplicationShutdown {
     })
 
     await this.alloc.reallocate(this.state)
+    // Adopt orphan positions on boot — fills that landed while the engine was
+    // down or pair-hedges that completed externally need to be visible to C5b
+    // before the first MTM sweep fires (MTM_SWEEP_MS later).
+    await this.fill.sweepOrphans(this.state)
     this.scheduleRewardTick()
     this.scheduleRealloc()
     this.scheduleMtmSweep()
@@ -228,7 +232,10 @@ export class EngineService implements OnModuleInit, OnApplicationShutdown {
 
   private scheduleMtmSweep(): void {
     if (this.mtmSweepTimer) clearInterval(this.mtmSweepTimer)
-    this.mtmSweepTimer = setInterval(() => this.fill.sweepMtm(this.state), MTM_SWEEP_MS)
+    this.mtmSweepTimer = setInterval(() => {
+      this.fill.sweepMtm(this.state)
+      void this.fill.sweepOrphans(this.state)
+    }, MTM_SWEEP_MS)
   }
 
   private scheduleHourlySnapshot(): void {
