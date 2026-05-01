@@ -234,7 +234,7 @@ export class EngineFillService {
     } catch {
       return
     }
-    const COOLDOWN_MS = 5 * 60 * 1000
+    const COOLDOWN_MS = 15 * 60 * 1000
     for (const rp of realPositions) {
       if (s.positions.has(rp.conditionId)) continue
       const liquidatedAt = s.liquidationCooldown.get(rp.conditionId)

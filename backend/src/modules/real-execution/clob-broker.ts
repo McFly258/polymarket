@@ -646,12 +646,14 @@ export class ClobBroker implements OnModuleInit, OnApplicationShutdown {
     const posData = await this.fetchPositionData(tokenId)
     if (posData !== null && posData.size <= 0) {
       this.logger.log(`marketSell ${conditionId.slice(0, 8)}: wallet balance is 0 — position already cleared`)
+      await this.positionRepo.delete(conditionId)
       return
     }
 
     const actualSize = posData !== null && posData.size < size ? posData.size : size
     if (actualSize < CLOB_MIN_SIZE) {
       this.logger.warn(`marketSell ${conditionId.slice(0, 8)}: size ${actualSize.toFixed(4)} below CLOB min (${CLOB_MIN_SIZE}) — dust, skipping`)
+      await this.positionRepo.delete(conditionId)
       return
     }
 
@@ -678,6 +680,9 @@ export class ClobBroker implements OnModuleInit, OnApplicationShutdown {
         throw proxyErr
       }
     }
+
+    // Remove from real_positions so reconciler doesn't resurrect the row.
+    await this.positionRepo.delete(conditionId)
   }
 
   // Dispatches a closing sell for a fill whose hedge was previously skipped or
