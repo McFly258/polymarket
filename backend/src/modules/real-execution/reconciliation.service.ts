@@ -286,25 +286,37 @@ export class ReconciliationService implements OnModuleInit, OnApplicationShutdow
         continue
       }
 
+      // Trust on-chain wallet over the fills ledger. Divergence happens when a
+      // SELL fill never gets a clobTradeId (paper-only) or wallet-sync misses
+      // a trade — the ledger then shows phantom inventory we don't actually
+      // hold. Without this check, sweepOrphans loops forever trying to
+      // liquidate a position the wallet says is already gone.
+      const latest = fills.reduce((a, b) => (a.filledAt > b.filledAt ? a : b))
+      const order =
+        (await this.orderRepo.findById(latest.realOrderId).catch(() => null)) ??
+        (await this.orderRepo.findByDecisionId(latest.decisionId).catch(() => null))
+      const tokenId = order?.tokenId ?? latest.tokenId ?? ''
+      if (tokenId) {
+        const walletSize = await this.broker.getOnChainTokenSize(tokenId).catch(() => null)
+        if (walletSize !== null && walletSize <= SIZE_EPSILON) {
+          this.logger.log(
+            `rebuildPositions: ${conditionId.slice(0, 8)} ledger says +${netSize.toFixed(2)} but wallet shows ${walletSize.toFixed(4)} — clearing phantom row`,
+          )
+          await this.positionRepo.delete(conditionId)
+          continue
+        }
+      }
+
       const bidPrice =
         bidSize > 0 ? bidFills.reduce((s, f) => s + f.fillPrice * f.size, 0) / bidSize : 0
       const askPrice =
         askSize > 0 ? askFills.reduce((s, f) => s + f.fillPrice * f.size, 0) / askSize : 0
 
-      const latest = fills.reduce((a, b) => (a.filledAt > b.filledAt ? a : b))
-      const order =
-        (await this.orderRepo.findById(latest.realOrderId).catch(() => null)) ??
-        (await this.orderRepo.findByDecisionId(latest.decisionId).catch(() => null))
-
       await this.positionRepo.upsert({
         conditionId,
         decisionId: latest.decisionId,
         question: latest.question,
-        // Fall back to the fill's tokenId when no matching order exists (e.g.
-        // wallet-sync fills whose decisionId is "wallet-sync-tx-...").
-        // Without this fallback, real_positions rows have empty tokenId and the
-        // startup liquidator can't sell them.
-        tokenId: order?.tokenId ?? latest.tokenId ?? '',
+        tokenId,
         outcome: order?.outcome ?? '',
         bidOrderId: bidFills.length > 0 ? bidFills[bidFills.length - 1].realOrderId : null,
         askOrderId: askFills.length > 0 ? askFills[askFills.length - 1].realOrderId : null,

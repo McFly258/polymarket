@@ -634,6 +634,16 @@ export class ClobBroker implements OnModuleInit, OnApplicationShutdown {
     }
   }
 
+  // Public wrapper around fetchPositionData for callers that only need the
+  // on-chain token balance. Returns null when fetch fails (network/API),
+  // distinguishable from "wallet truly empty" which returns 0. The reconciler
+  // uses this to detect ledger/wallet divergence before recreating ghost rows.
+  async getOnChainTokenSize(tokenId: string): Promise<number | null> {
+    if (!this.isRealEnabled()) return null
+    const data = await this.fetchPositionData(tokenId)
+    return data === null ? null : data.size
+  }
+
   // Sell `size` shares of `tokenId` via a single FOK market order.
   // Used by closePosition to actually flatten held inventory.
   // No-op when real execution is disabled.
