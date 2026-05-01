@@ -80,6 +80,9 @@ export class ReconciliationService implements OnModuleInit, OnApplicationShutdow
   private totalFillsIngested = 0
   private totalDiscrepancies = 0
   private totalErrors = 0
+  // Positions confirmed flat on-chain this process lifetime — skip in rebuildPositions
+  // to avoid spamming "clearing phantom row" every 30s for fills with no matching sell clobTradeId.
+  private readonly confirmedFlat = new Set<string>()
 
   constructor(
     private readonly broker: ClobBroker,
@@ -274,6 +277,10 @@ export class ReconciliationService implements OnModuleInit, OnApplicationShutdow
     }
 
     for (const [conditionId, fills] of byCondition) {
+      // Skip positions already confirmed flat this process lifetime — avoids
+      // "clearing phantom row" spam every 30s when a SELL has no clobTradeId.
+      if (this.confirmedFlat.has(conditionId)) continue
+
       const bidFills = fills.filter((f) => f.side === 'bid')
       const askFills = fills.filter((f) => f.side === 'ask')
       const bidSize = bidFills.reduce((s, f) => s + f.size, 0)
@@ -283,6 +290,7 @@ export class ReconciliationService implements OnModuleInit, OnApplicationShutdow
       // Position is flat or over-sold — remove it rather than leaving a ghost row.
       if (netSize <= SIZE_EPSILON) {
         await this.positionRepo.delete(conditionId)
+        this.confirmedFlat.add(conditionId)
         continue
       }
 
@@ -303,6 +311,7 @@ export class ReconciliationService implements OnModuleInit, OnApplicationShutdow
             `rebuildPositions: ${conditionId.slice(0, 8)} ledger says +${netSize.toFixed(2)} but wallet shows ${walletSize.toFixed(4)} — clearing phantom row`,
           )
           await this.positionRepo.delete(conditionId)
+          this.confirmedFlat.add(conditionId)
           continue
         }
       }
