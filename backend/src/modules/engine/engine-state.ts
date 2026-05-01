@@ -24,6 +24,9 @@ export interface EngineRuntimeState {
   // checks this set to avoid re-opening markets that reallocate() intentionally
   // dropped, even when a concurrent drift-cancel fires for the same market.
   lastAllocSet: Set<string>
+  // Timestamp (ms) of last closePosition liquidation per conditionId. sweepOrphans
+  // checks this to avoid re-adopting a position before the reconciler catches up.
+  liquidationCooldown: Map<string, number>
 }
 
 export function createEngineRuntimeState(): EngineRuntimeState {
@@ -43,6 +46,7 @@ export function createEngineRuntimeState(): EngineRuntimeState {
     rewardLastUpdatedAt: Date.now(),
     ws: null,
     lastAllocSet: new Set(),
+    liquidationCooldown: new Map(),
   }
 }
 

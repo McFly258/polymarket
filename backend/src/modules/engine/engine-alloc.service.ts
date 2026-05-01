@@ -370,6 +370,7 @@ export class EngineAllocService {
       })
     }
 
+    s.liquidationCooldown.set(conditionId, Date.now())
     s.positions.delete(conditionId)
     await this.positionRepo.delete(conditionId)
   }
