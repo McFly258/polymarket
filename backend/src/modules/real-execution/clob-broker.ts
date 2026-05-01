@@ -634,6 +634,52 @@ export class ClobBroker implements OnModuleInit, OnApplicationShutdown {
     }
   }
 
+  // Sell `size` shares of `tokenId` via a single FOK market order.
+  // Used by closePosition to actually flatten held inventory.
+  // No-op when real execution is disabled.
+  async marketSell(tokenId: string, size: number, conditionId: string): Promise<void> {
+    if (!this.isRealEnabled()) {
+      this.logger.debug(`marketSell ${conditionId.slice(0, 8)}: real execution disabled — skipping`)
+      return
+    }
+
+    const posData = await this.fetchPositionData(tokenId)
+    if (posData !== null && posData.size <= 0) {
+      this.logger.log(`marketSell ${conditionId.slice(0, 8)}: wallet balance is 0 — position already cleared`)
+      return
+    }
+
+    const actualSize = posData !== null && posData.size < size ? posData.size : size
+    if (actualSize < CLOB_MIN_SIZE) {
+      this.logger.warn(`marketSell ${conditionId.slice(0, 8)}: size ${actualSize.toFixed(4)} below CLOB min (${CLOB_MIN_SIZE}) — dust, skipping`)
+      return
+    }
+
+    const limitPrice = posData !== null ? Math.max(posData.price - 0.01, 0.01) : 0.01
+    const orderParams = { tokenID: tokenId, amount: actualSize, side: Side.SELL, price: limitPrice }
+
+    const trySell = async (client: ClobClient): Promise<void> => {
+      const resp = await client.createAndPostMarketOrder(orderParams, undefined, OrderType.FOK)
+      const r = resp as Record<string, unknown>
+      if (!r['success']) {
+        throw new Error(String(r['errorMsg'] ?? r['error'] ?? 'Polymarket rejected marketSell'))
+      }
+      this.logger.log(`marketSell ${conditionId.slice(0, 8)}: FOK filled, order ${String(r['orderID'] ?? r['id'] ?? '?')}`)
+    }
+
+    try {
+      await trySell(this.getClient())
+    } catch (proxyErr) {
+      const msg = proxyErr instanceof Error ? proxyErr.message : String(proxyErr)
+      if (msg.includes('not enough balance') || msg.includes('not enough allowance')) {
+        this.logger.warn(`marketSell ${conditionId.slice(0, 8)}: proxy balance insufficient, retrying via EOA client`)
+        await trySell(this.getEoaClient())
+      } else {
+        throw proxyErr
+      }
+    }
+  }
+
   // Dispatches a closing sell for a fill whose hedge was previously skipped or
   // failed. Ask-side fills used buy-NO at order time, so we sell NO to close;
   // bid-side fills bought YES, so we sell YES. Both are token sells — no USDC

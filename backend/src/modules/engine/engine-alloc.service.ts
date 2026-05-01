@@ -30,6 +30,8 @@ import { OrderRepo, type OrderRow } from '../persistence/order.repo'
 import { PositionRepo } from '../persistence/position.repo'
 import { EngineStateRepo } from '../persistence/engine-state.repo'
 
+import { ClobBroker } from '../real-execution/clob-broker'
+
 import { EngineDataService } from './engine-data.service'
 import type { EngineRuntimeState } from './engine-state'
 import { positionRowFromInternal } from './engine-state'
@@ -43,6 +45,7 @@ export class EngineAllocService {
     @Inject(forwardRef(() => EngineService)) private readonly engine: EngineService,
     private readonly data: EngineDataService,
     @Inject(BROKER_TOKEN) private readonly broker: Broker,
+    private readonly clobBroker: ClobBroker,
     private readonly orderRepo: OrderRepo,
     private readonly fillRepo: FillRepo,
     private readonly positionRepo: PositionRepo,
@@ -348,20 +351,11 @@ export class EngineAllocService {
     // Liquidate held inventory: pair-hedge awaiting second leg, or hedge failure.
     // Without this the tokens sit in the wallet after stop-loss/drawdown triggers.
     if (pos.pendingPairFill) {
-      const inventorySide = pos.pendingPairFill === 'bid' ? 'sell' : 'buy'
       const inventorySize = pos.pendingPairFill === 'bid' ? pos.bidSize : pos.askSize
-      const fillPrice = pos.pendingPairFill === 'bid' ? pos.bidPrice : pos.askPrice
       this.logger.log(
-        `closePosition ${conditionId.slice(0, 8)} — liquidating ${inventorySide} ${inventorySize} shares (pendingPairFill=${pos.pendingPairFill})`,
+        `closePosition ${conditionId.slice(0, 8)} — liquidating ${inventorySize} shares (pendingPairFill=${pos.pendingPairFill})`,
       )
-      void this.broker.marketHedge({
-        conditionId,
-        tokenId: pos.tokenId,
-        side: inventorySide,
-        size: inventorySize,
-        expectedPrice: fillPrice,
-        fillPrice: pos.midPrice ?? fillPrice,
-      }).then(() => {
+      void this.clobBroker.marketSell(pos.tokenId, inventorySize, conditionId).then(() => {
         this.logger.log(`closePosition ${conditionId.slice(0, 8)}: inventory liquidated`)
       }).catch((err: unknown) => {
         const msg = err instanceof Error ? err.message : String(err)
