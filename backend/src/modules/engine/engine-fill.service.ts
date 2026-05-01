@@ -272,8 +272,10 @@ export class EngineFillService {
       }
       s.positions.set(rp.conditionId, orphan)
       notifyTelegram(
-        `⚠️ Orphan position adopted: ${tag}\nNet long ${netLong.toFixed(2)} shares @ avg ${rp.bidPrice.toFixed(3)}\nMTM stop-loss now active.`,
+        `⚠️ Orphan position adopted: ${tag}\nNet long ${netLong.toFixed(2)} shares @ avg ${rp.bidPrice.toFixed(3)}\nLiquidating immediately.`,
       )
+      // Liquidate immediately — don't wait for a WS tick (illiquid markets never get one).
+      await this.alloc.closePosition(s, rp.conditionId)
     }
   }
 
