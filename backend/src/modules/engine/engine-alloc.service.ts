@@ -114,6 +114,14 @@ export class EngineAllocService {
     for (const alloc of sim.allocations) {
       const row = rowsById.get(alloc.conditionId)
       if (!row) continue
+      // Skip markets currently mid-flight from a drift-cancel → repost. The
+      // position is already deleted but the cancel may not have landed at the
+      // CLOB yet, so opening here would stack new orders on top of the live
+      // ones (the original "3 orders" / balance-error scenario).
+      if (s.pendingRepostMarkets.has(alloc.conditionId)) {
+        this.logger.log(`reallocate skip ${alloc.conditionId.slice(0, 8)} — drift-cancel/repost in flight`)
+        continue
+      }
       const existing = s.positions.get(alloc.conditionId)
       let effectiveAlloc = alloc
       const biasMeta = s.inventoryBias.get(alloc.conditionId)
@@ -406,35 +414,42 @@ export class EngineAllocService {
   }
 
   async repositionMarket(s: EngineRuntimeState, conditionId: string): Promise<void> {
-    if (s.state !== 'running' || !s.config) return
-    if (s.positions.has(conditionId)) return
-    const tag = conditionId.slice(0, 8)
-    if (s.lastAllocSet.size > 0 && !s.lastAllocSet.has(conditionId)) {
-      this.logger.log(`reposition ${tag} — not in latest alloc set, skip`)
-      return
-    }
-    let rows: RewardsRow[]
     try {
-      rows = await this.data.fetchRewardsRows()
-    } catch (err) {
-      this.logger.error(`reposition ${tag} — fetch failed`, err as Error)
-      return
+      if (s.state !== 'running' || !s.config) return
+      if (s.positions.has(conditionId)) return
+      const tag = conditionId.slice(0, 8)
+      if (s.lastAllocSet.size > 0 && !s.lastAllocSet.has(conditionId)) {
+        this.logger.log(`reposition ${tag} — not in latest alloc set, skip`)
+        return
+      }
+      let rows: RewardsRow[]
+      try {
+        rows = await this.data.fetchRewardsRows()
+      } catch (err) {
+        this.logger.error(`reposition ${tag} — fetch failed`, err as Error)
+        return
+      }
+      const vol = this.data.loadVolatility(s.midPriceHistory)
+      const effectiveConfig = await this.capConfigToFreeBalance(s.config)
+      const sim = runSimulation(rows, effectiveConfig, vol)
+      const alloc = sim.allocations.find((a) => a.conditionId === conditionId)
+      const row = rows.find((r) => r.conditionId === conditionId)
+      if (!alloc || !row) {
+        this.logger.log(`reposition ${tag} — dropped by allocator, skip`)
+        return
+      }
+      if (s.state !== 'running' || s.positions.has(conditionId)) return
+      if (!s.lastAllocSet.has(conditionId)) {
+        this.logger.log(`reposition ${tag} — dropped by allocator mid-flight, skip`)
+        return
+      }
+      this.logger.log(`reposition ${tag} — post-drift repost`)
+      await this.openPosition(s, alloc, row, vol)
+    } finally {
+      // Always release the in-flight marker — success, early-skip, or throw.
+      // Without this, a market that fails to repost would be silently locked
+      // out of all future reallocate() runs.
+      s.pendingRepostMarkets.delete(conditionId)
     }
-    const vol = this.data.loadVolatility(s.midPriceHistory)
-    const effectiveConfig = await this.capConfigToFreeBalance(s.config)
-    const sim = runSimulation(rows, effectiveConfig, vol)
-    const alloc = sim.allocations.find((a) => a.conditionId === conditionId)
-    const row = rows.find((r) => r.conditionId === conditionId)
-    if (!alloc || !row) {
-      this.logger.log(`reposition ${tag} — dropped by allocator, skip`)
-      return
-    }
-    if (s.state !== 'running' || s.positions.has(conditionId)) return
-    if (!s.lastAllocSet.has(conditionId)) {
-      this.logger.log(`reposition ${tag} — dropped by allocator mid-flight, skip`)
-      return
-    }
-    this.logger.log(`reposition ${tag} — post-drift repost`)
-    await this.openPosition(s, alloc, row, vol)
   }
 }

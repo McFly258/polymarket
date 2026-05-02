@@ -31,6 +31,11 @@ export interface EngineRuntimeState {
   // WS book ticks (throttled to one sample per REALLOC_MS). Pruned to 24h window.
   midPriceHistory: Map<string, { ts: number; mid: number }[]>
   midPriceLastSampled: Map<string, number>
+  // Condition IDs whose drift-cancel → repost is in flight. Marked the moment
+  // the position is deleted from `positions` so concurrent reallocate() runs
+  // do NOT see an empty slot and double-open while the cancel/repost is still
+  // racing to land at the CLOB. Cleared by repositionMarket() in finally.
+  pendingRepostMarkets: Set<string>
 }
 
 export function createEngineRuntimeState(): EngineRuntimeState {
@@ -53,6 +58,7 @@ export function createEngineRuntimeState(): EngineRuntimeState {
     liquidationCooldown: new Map(),
     midPriceHistory: new Map(),
     midPriceLastSampled: new Map(),
+    pendingRepostMarkets: new Set(),
   }
 }
 

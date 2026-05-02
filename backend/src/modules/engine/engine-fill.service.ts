@@ -145,25 +145,37 @@ export class EngineFillService {
       this.logger.log(
         `C4 drift-cancel ${tag} — bestBid=${view.bestBid?.toFixed(3)} ourBid=${pos.bidPrice.toFixed(3)} bestAsk=${view.bestAsk?.toFixed(3)} ourAsk=${pos.askPrice.toFixed(3)}`,
       )
-      s.positions.delete(pos.conditionId)
+      const cidToRepost = pos.conditionId
+      // Mark BEFORE deleting so a concurrent reallocate() will not see the
+      // empty slot and double-open while the cancel/repost is still racing.
+      s.pendingRepostMarkets.add(cidToRepost)
+      s.positions.delete(cidToRepost)
       const toCancel = [pos.bidOrderId, pos.askOrderId].filter((x): x is string => !!x)
       const now = Date.now()
-      const cidToRepost = pos.conditionId
       const decisionIdToCancel = pos.decisionId
-      void Promise.all(toCancel.map((id) => this.broker.cancelOrder(id))).then(async () => {
-        for (const id of toCancel) await this.orderRepo.updateStatus(id, 'cancelled', now)
-        await this.positionRepo.delete(cidToRepost)
-        for (const id of toCancel) {
-          this.events.emit(ENGINE_EVENT.ORDER_CANCELLED, {
-            decisionId: decisionIdToCancel,
-            paperOrderId: id,
-            at: now,
-          } satisfies OrderCancelledEvent)
-        }
-        setTimeout(() => {
-          void this.alloc.repositionMarket(s, cidToRepost)
-        }, REPOSITION_DELAY_MS)
-      })
+      Promise.all(toCancel.map((id) => this.broker.cancelOrder(id)))
+        .then(async () => {
+          for (const id of toCancel) await this.orderRepo.updateStatus(id, 'cancelled', now)
+          await this.positionRepo.delete(cidToRepost)
+          for (const id of toCancel) {
+            this.events.emit(ENGINE_EVENT.ORDER_CANCELLED, {
+              decisionId: decisionIdToCancel,
+              paperOrderId: id,
+              at: now,
+            } satisfies OrderCancelledEvent)
+          }
+          setTimeout(() => {
+            void this.alloc.repositionMarket(s, cidToRepost)
+          }, REPOSITION_DELAY_MS)
+        })
+        .catch((err: unknown) => {
+          // Cancel chain failed before reposition was scheduled — clear the
+          // marker so the market is eligible for re-entry on next reallocate.
+          s.pendingRepostMarkets.delete(cidToRepost)
+          this.logger.warn(
+            `drift-cancel ${tag} cancel chain failed: ${err instanceof Error ? err.message : String(err)}`,
+          )
+        })
       return
     }
 
