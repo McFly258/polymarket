@@ -45,6 +45,18 @@ const WALLET_SYNC_DEFAULT_LOOKBACK_MS = 30 * 24 * 60 * 60 * 1000 // 30 days
 // re-ingestion of already-recorded fills.
 const WALLET_SYNC_CURSOR_LAG_MS = 60 * 60 * 1000 // 60 minutes
 
+// rebuildPositions queries the same data-api as wallet-sync to detect ledger
+// divergence. Same indexing lag applies — if a fill is fresher than this, trust
+// the ledger and skip the wallet check. Otherwise we silently delete real_positions
+// rows for trades the data-api hasn't reflected yet, hiding inventory from
+// sweepOrphans and preventing C6 max-hold liquidation from ever firing.
+const FRESH_FILL_GUARD_MS = 10 * 60 * 1000 // 10 minutes
+
+// confirmedFlat entries expire after this — re-verify against the wallet so a
+// transient data-api hiccup doesn't permanently hide a real position.
+const CONFIRMED_FLAT_TTL_MS = 10 * 60 * 1000 // 10 minutes
+
+
 export interface ReconciliationStatus {
   enabled: boolean
   running: boolean
@@ -80,9 +92,11 @@ export class ReconciliationService implements OnModuleInit, OnApplicationShutdow
   private totalFillsIngested = 0
   private totalDiscrepancies = 0
   private totalErrors = 0
-  // Positions confirmed flat on-chain this process lifetime — skip in rebuildPositions
-  // to avoid spamming "clearing phantom row" every 30s for fills with no matching sell clobTradeId.
-  private readonly confirmedFlat = new Set<string>()
+  // Positions confirmed flat on-chain — skip in rebuildPositions to avoid spamming
+  // "clearing phantom row" every 30s for fills with no matching sell clobTradeId.
+  // Stored with timestamp so a one-time data-api blip doesn't permanently disable
+  // the position; entries expire after CONFIRMED_FLAT_TTL_MS and get re-verified.
+  private readonly confirmedFlat = new Map<string, number>()
 
   constructor(
     private readonly broker: ClobBroker,
@@ -277,9 +291,12 @@ export class ReconciliationService implements OnModuleInit, OnApplicationShutdow
     }
 
     for (const [conditionId, fills] of byCondition) {
-      // Skip positions already confirmed flat this process lifetime — avoids
-      // "clearing phantom row" spam every 30s when a SELL has no clobTradeId.
-      if (this.confirmedFlat.has(conditionId)) continue
+      // Skip positions already confirmed flat — avoids "clearing phantom row"
+      // spam every 30s when a SELL has no clobTradeId. TTL prevents a one-time
+      // data-api hiccup from permanently hiding a real position.
+      const flatAt = this.confirmedFlat.get(conditionId)
+      if (flatAt && Date.now() - flatAt < CONFIRMED_FLAT_TTL_MS) continue
+      if (flatAt) this.confirmedFlat.delete(conditionId)
 
       const bidFills = fills.filter((f) => f.side === 'bid')
       const askFills = fills.filter((f) => f.side === 'ask')
@@ -290,7 +307,7 @@ export class ReconciliationService implements OnModuleInit, OnApplicationShutdow
       // Position is flat or over-sold — remove it rather than leaving a ghost row.
       if (netSize <= SIZE_EPSILON) {
         await this.positionRepo.delete(conditionId)
-        this.confirmedFlat.add(conditionId)
+        this.confirmedFlat.set(conditionId, Date.now())
         continue
       }
 
@@ -304,14 +321,19 @@ export class ReconciliationService implements OnModuleInit, OnApplicationShutdow
         (await this.orderRepo.findById(latest.realOrderId).catch(() => null)) ??
         (await this.orderRepo.findByDecisionId(latest.decisionId).catch(() => null))
       const tokenId = order?.tokenId ?? latest.tokenId ?? ''
-      if (tokenId) {
+      // Skip the wallet check when the latest fill is too fresh — data-api lag
+      // means the just-confirmed trade may not be indexed yet, and we'd silently
+      // delete the real_positions row and permanently mark the conditionId flat,
+      // hiding inventory from sweepOrphans. Trust the ledger for fresh fills.
+      const isFreshFill = Date.now() - latest.filledAt < FRESH_FILL_GUARD_MS
+      if (tokenId && !isFreshFill) {
         const walletSize = await this.broker.getOnChainTokenSize(tokenId).catch(() => null)
         if (walletSize !== null && walletSize <= SIZE_EPSILON) {
           this.logger.log(
             `rebuildPositions: ${conditionId.slice(0, 8)} ledger says +${netSize.toFixed(2)} but wallet shows ${walletSize.toFixed(4)} — clearing phantom row`,
           )
           await this.positionRepo.delete(conditionId)
-          this.confirmedFlat.add(conditionId)
+          this.confirmedFlat.set(conditionId, Date.now())
           continue
         }
       }

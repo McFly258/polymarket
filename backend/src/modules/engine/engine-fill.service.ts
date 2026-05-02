@@ -316,6 +316,7 @@ export class EngineFillService {
         totalScore: 0,
         latestBook: null,
         pendingPairFill: 'bid',
+        pendingPairFillAt: Date.now(),
       }
       s.positions.set(rp.conditionId, orphan)
       notifyTelegram(
