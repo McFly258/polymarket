@@ -178,10 +178,10 @@ export class EngineFillService {
       return
     }
 
-    if (pos.bidOrderId && view.bestBid !== null && view.bestBid <= pos.bidPrice) {
+    if (pos.bidOrderId && view.bestAsk !== null && view.bestAsk <= pos.bidPrice) {
       void this.handleFill(s, pos, 'bid', view)
     }
-    if (pos.askOrderId && view.bestAsk !== null && view.bestAsk >= pos.askPrice) {
+    if (pos.askOrderId && view.bestBid !== null && view.bestBid >= pos.askPrice) {
       void this.handleFill(s, pos, 'ask', view)
     }
   }
@@ -192,14 +192,13 @@ export class EngineFillService {
   sweepMtm(s: EngineRuntimeState): void {
     if (s.state !== 'running') return
     const mtmStop = s.config?.mtmStopLossPct ?? 0
-    if (mtmStop <= 0) return
     for (const pos of s.positions.values()) {
       if (pos.midPrice === null) continue
       const mid = pos.midPrice
 
-      // C5-sweep: open order MTM
-      const bidBreached = !!pos.bidOrderId && mid < pos.bidPrice * (1 - mtmStop)
-      const askBreached = !!pos.askOrderId && mid > pos.askPrice * (1 + mtmStop)
+      // C5-sweep: open order MTM (only when mtmStop is configured)
+      const bidBreached = mtmStop > 0 && !!pos.bidOrderId && mid < pos.bidPrice * (1 - mtmStop)
+      const askBreached = mtmStop > 0 && !!pos.askOrderId && mid > pos.askPrice * (1 + mtmStop)
       if (bidBreached || askBreached) {
         const side = bidBreached ? 'bid' : 'ask'
         const ourPrice = bidBreached ? pos.bidPrice : pos.askPrice
@@ -224,8 +223,8 @@ export class EngineFillService {
       const longInventory = pos.pendingPairFill === 'bid'
       const shortInventory = pos.pendingPairFill === 'ask'
       if (longInventory || shortInventory) {
-        const longBreached = longInventory && mid < pos.bidPrice * (1 - mtmStop)
-        const shortBreached = shortInventory && mid > pos.askPrice * (1 + mtmStop)
+        const longBreached = mtmStop > 0 && longInventory && mid < pos.bidPrice * (1 - mtmStop)
+        const shortBreached = mtmStop > 0 && shortInventory && mid > pos.askPrice * (1 + mtmStop)
         if (longBreached || shortBreached) {
           const inventorySide = longBreached ? 'long' : 'short'
           const fillPrice = longBreached ? pos.bidPrice : pos.askPrice

@@ -70,10 +70,10 @@ export function evaluateBook(engine: BackendPaperEngine, tokenId: string, view: 
     return
   }
 
-  if (pos.bidOrderId && view.bestBid !== null && view.bestBid <= pos.bidPrice) {
+  if (pos.bidOrderId && view.bestAsk !== null && view.bestAsk <= pos.bidPrice) {
     void handleFill(engine, pos, 'bid', view)
   }
-  if (pos.askOrderId && view.bestAsk !== null && view.bestAsk >= pos.askPrice) {
+  if (pos.askOrderId && view.bestBid !== null && view.bestBid >= pos.askPrice) {
     void handleFill(engine, pos, 'ask', view)
   }
 }
