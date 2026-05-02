@@ -242,6 +242,28 @@ export class EngineFillService {
           notifyTelegram(
             `⛔ Inventory MTM stop-loss (sweep): ${inventorySide} filled@${fillPrice.toFixed(3)}, mid=${mid.toFixed(3)} (>${(mtmStop * 100).toFixed(0)}% against)\n${pos.question}\nRemaining order cancelled. Blacklisted ${s.config?.blacklistMinutes ?? 60}m.`,
           )
+          continue
+        }
+
+        // C6: max inventory hold time — force-liquidate if opposing leg hasn't
+        // filled within the configured window. Prevents dead capital when the
+        // market stalls after a one-sided fill.
+        const maxHoldMs = (s.config?.maxInventoryHoldMinutes ?? 5) * 60_000
+        if (pos.pendingPairFillAt && Date.now() - pos.pendingPairFillAt > maxHoldMs) {
+          const inventorySide = longInventory ? 'long' : 'short'
+          const fillPrice = longInventory ? pos.bidPrice : pos.askPrice
+          const heldMin = ((Date.now() - pos.pendingPairFillAt) / 60_000).toFixed(1)
+          const tag = pos.conditionId.slice(0, 8)
+          this.logger.log(
+            `C6 max-hold liquidation ${tag} — ${inventorySide} held ${heldMin}m (>${s.config?.maxInventoryHoldMinutes ?? 5}m limit)`,
+          )
+          s.fillHistory.delete(pos.conditionId)
+          s.marketPnlHistory.delete(pos.conditionId)
+          s.inventoryBias.delete(pos.conditionId)
+          void this.alloc.closePosition(s, pos.conditionId)
+          notifyTelegram(
+            `⏱ Max-hold liquidation: ${inventorySide} filled@${fillPrice.toFixed(3)} held ${heldMin}m without opposing fill\n${pos.question}\nForce-liquidating.`,
+          )
         }
       }
     }
@@ -357,6 +379,7 @@ export class EngineFillService {
     } else if (usePairHedge) {
       // Mark the pair leg so the second fill (or shutdown) knows not to externally hedge.
       pos.pendingPairFill = oppositeAlreadyPending ? undefined : side
+      pos.pendingPairFillAt = pos.pendingPairFill ? Date.now() : undefined
       this.logger.log(
         `pair-hedge ${pos.conditionId.slice(0, 8)} — ${side} filled at ${orderPrice}, ${
           oppositeAlreadyPending ? 'closing pair' : 'awaiting opposite leg'
@@ -429,6 +452,7 @@ export class EngineFillService {
         // Mark inventory so C5b MTM and closePosition can see and liquidate it.
         // The reconciler's retryUnhedgedFills will also retry the hedge.
         pos.pendingPairFill = side
+        pos.pendingPairFillAt = Date.now()
       }
     }
 

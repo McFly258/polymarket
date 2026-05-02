@@ -56,6 +56,9 @@ export const DEFAULT_STRATEGY: StrategyConfig = {
   // against our posted price (e.g. 0.5 = 50%). Prevents being filled into a
   // position at a price that has become deeply out-of-the-money before the fill.
   mtmStopLossPct: 0.50,
+  // Force-liquidate inventory if the opposing hedge leg hasn't filled within
+  // this many minutes. Prevents capital sitting dead when the market stalls.
+  maxInventoryHoldMinutes: 5,
 }
 
 // ── Reward scoring ──────────────────────────────────────────────────────────

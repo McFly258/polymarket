@@ -34,6 +34,7 @@ export interface StrategyConfig {
   subMinFallbackEnabled?: boolean
   maxRewardMinSize?: number
   mtmStopLossPct?: number
+  maxInventoryHoldMinutes?: number
 }
 
 export interface StrategyAllocation {

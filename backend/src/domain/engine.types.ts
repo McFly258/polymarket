@@ -31,6 +31,8 @@ export interface InternalPosition {
   // Set when one side fills naturally while the opposing order is still live.
   // Cleared when the opposing order fills — no external hedge needed for either leg.
   pendingPairFill?: 'bid' | 'ask'
+  // Epoch ms when pendingPairFill was last set — used by the max-hold-time circuit breaker.
+  pendingPairFillAt?: number
 }
 
 export interface FillEntry {
