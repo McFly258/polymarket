@@ -47,14 +47,12 @@ export function evaluateBook(engine: BackendPaperEngine, tokenId: string, view: 
   pos.bestBid = view.bestBid
   pos.bestAsk = view.bestAsk
 
-  // C4: drift-cancel — market has moved within DRIFT_CANCEL_TICKS of our quote
-  //     but hasn't filled us yet. Cancel immediately; next realloc will repost.
+  // C4: drift-cancel — fire whenever market has moved ≥ DRIFT_CANCEL_TICKS away,
+  //     not just within 1 tick, so large jumps don't leave capital stranded.
   const bidDrift = pos.bidOrderId && view.bestBid !== null &&
-                   view.bestBid > pos.bidPrice &&
-                   view.bestBid <= pos.bidPrice + DRIFT_CANCEL_TICKS * TICK
+                   view.bestBid >= pos.bidPrice + DRIFT_CANCEL_TICKS * TICK
   const askDrift = pos.askOrderId && view.bestAsk !== null &&
-                   view.bestAsk < pos.askPrice &&
-                   view.bestAsk >= pos.askPrice - DRIFT_CANCEL_TICKS * TICK
+                   view.bestAsk <= pos.askPrice - DRIFT_CANCEL_TICKS * TICK
   if (bidDrift || askDrift) {
     const tag = pos.conditionId.slice(0, 8)
     console.log(`[engine] C4 drift-cancel ${tag} — bestBid=${view.bestBid?.toFixed(3)} ourBid=${pos.bidPrice.toFixed(3)} bestAsk=${view.bestAsk?.toFixed(3)} ourAsk=${pos.askPrice.toFixed(3)}`)

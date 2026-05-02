@@ -129,17 +129,16 @@ export class EngineFillService {
       }
     }
 
-    // C4: drift-cancel.
+    // C4: drift-cancel — fire whenever market has moved ≥ DRIFT_CANCEL_TICKS away,
+    //     not just within 1 tick, so large jumps don't leave capital stranded.
     const bidDrift =
       pos.bidOrderId &&
       view.bestBid !== null &&
-      view.bestBid > pos.bidPrice &&
-      view.bestBid <= pos.bidPrice + DRIFT_CANCEL_TICKS * TICK
+      view.bestBid >= pos.bidPrice + DRIFT_CANCEL_TICKS * TICK
     const askDrift =
       pos.askOrderId &&
       view.bestAsk !== null &&
-      view.bestAsk < pos.askPrice &&
-      view.bestAsk >= pos.askPrice - DRIFT_CANCEL_TICKS * TICK
+      view.bestAsk <= pos.askPrice - DRIFT_CANCEL_TICKS * TICK
     if (bidDrift || askDrift) {
       const tag = pos.conditionId.slice(0, 8)
       this.logger.log(
